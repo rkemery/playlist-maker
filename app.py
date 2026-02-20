@@ -194,7 +194,12 @@ _spotify: Optional[SpotifyClient] = None
 def get_spotify() -> SpotifyClient:
     global _spotify
     if _spotify is None:
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spotify_cache")
+        # On Azure, the app runs from /tmp but persistent files are in /home/site/wwwroot
+        home_wwwroot = "/home/site/wwwroot"
+        if os.path.isdir(home_wwwroot):
+            cache_path = os.path.join(home_wwwroot, ".spotify_cache")
+        else:
+            cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spotify_cache")
         _spotify = SpotifyClient(cache_path)
         logger.info("Spotify client initialized.")
     return _spotify
