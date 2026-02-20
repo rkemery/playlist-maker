@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Playlist Maker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #121212;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+    .container { max-width: 600px; width: 100%; }
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #b3b3b3;
+      margin-bottom: 32px;
+    }
+    .form-group { margin-bottom: 16px; }
+    label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #b3b3b3;
+    }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      padding: 12px 16px;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #1e1e1e;
+      color: #fff;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: #1db954; }
+    input[type="number"] { width: 100px; }
+    button {
+      background: #1db954;
+      color: #fff;
+      border: none;
+      padding: 12px 32px;
+      border-radius: 24px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background 0.2s, transform 0.1s;
+    }
+    button:hover { background: #1ed760; transform: scale(1.02); }
+    button:disabled { background: #535353; cursor: not-allowed; transform: none; }
+    .status {
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 8px;
+      background: #1e1e1e;
+      display: none;
+    }
+    .status.visible { display: block; }
+    .status .step {
+      color: #b3b3b3;
+      margin-bottom: 8px;
+      padding-left: 24px;
+      position: relative;
+    }
+    .status .step::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 6px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #333;
+    }
+    .status .step.active::before { background: #1db954; animation: pulse 1s infinite; }
+    .status .step.done::before { background: #1db954; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .result {
+      margin-top: 24px;
+      display: none;
+    }
+    .result.visible { display: block; }
+    .result h2 { font-size: 1.25rem; margin-bottom: 4px; }
+    .result .desc { color: #b3b3b3; margin-bottom: 16px; }
+    .result a {
+      display: inline-block;
+      background: #1db954;
+      color: #fff;
+      text-decoration: none;
+      padding: 10px 24px;
+      border-radius: 24px;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    .result a:hover { background: #1ed760; }
+    .track-list { list-style: none; }
+    .track-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #282828;
+      display: flex;
+      gap: 8px;
+    }
+    .track-list li:last-child { border-bottom: none; }
+    .track-num { color: #b3b3b3; min-width: 24px; text-align: right; }
+    .track-title { font-weight: 500; }
+    .track-artist { color: #b3b3b3; }
+    .error {
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 8px;
+      background: #3d1c1c;
+      color: #ff6b6b;
+      display: none;
+    }
+    .error.visible { display: block; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Playlist Maker</h1>
+    <p class="subtitle">Describe a vibe and AI will create a Spotify playlist for you.</p>
+
+    <form id="form">
+      <div class="form-group">
+        <label for="prompt">What kind of playlist do you want?</label>
+        <input type="text" id="prompt" placeholder="e.g. chill Sunday morning vibes" required>
+      </div>
+      <div class="form-group">
+        <label for="count">Number of tracks</label>
+        <input type="number" id="count" value="20" min="1" max="50">
+      </div>
+      <button type="submit" id="btn">Create Playlist</button>
+    </form>
+
+    <div class="status" id="status">
+      <div class="step" id="step1">Generating search queries...</div>
+      <div class="step" id="step2">Searching Spotify...</div>
+      <div class="step" id="step3">Curating your playlist...</div>
+      <div class="step" id="step4">Creating playlist on Spotify...</div>
+    </div>
+
+    <div class="error" id="error"></div>
+
+    <div class="result" id="result">
+      <h2 id="playlistName"></h2>
+      <p class="desc" id="playlistDesc"></p>
+      <a id="playlistLink" href="#" target="_blank">Open in Spotify</a>
+      <ul class="track-list" id="trackList"></ul>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("form");
+    const btn = document.getElementById("btn");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const resultEl = document.getElementById("result");
+    const steps = [
+      document.getElementById("step1"),
+      document.getElementById("step2"),
+      document.getElementById("step3"),
+      document.getElementById("step4"),
+    ];
+
+    function setStep(n) {
+      steps.forEach((s, i) => {
+        s.classList.toggle("active", i === n);
+        s.classList.toggle("done", i < n);
+      });
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const prompt = document.getElementById("prompt").value.trim();
+      const count = parseInt(document.getElementById("count").value) || 20;
+      if (!prompt) return;
+
+      btn.disabled = true;
+      errorEl.classList.remove("visible");
+      resultEl.classList.remove("visible");
+      statusEl.classList.add("visible");
+      setStep(0);
+
+      // Simulate progress steps (the backend does it all in one call)
+      const stepTimer1 = setTimeout(() => setStep(1), 3000);
+      const stepTimer2 = setTimeout(() => setStep(2), 8000);
+      const stepTimer3 = setTimeout(() => setStep(3), 15000);
+
+      try {
+        const resp = await fetch("/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, count }),
+        });
+        clearTimeout(stepTimer1);
+        clearTimeout(stepTimer2);
+        clearTimeout(stepTimer3);
+
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(data.error || "Something went wrong");
+        }
+
+        // Show all steps done
+        setStep(4);
+
+        // Display result
+        document.getElementById("playlistName").textContent = data.playlist_name;
+        document.getElementById("playlistDesc").textContent = data.description;
+        document.getElementById("playlistLink").href = data.playlist_url;
+
+        const trackList = document.getElementById("trackList");
+        trackList.innerHTML = "";
+        data.tracks.forEach((t, i) => {
+          const li = document.createElement("li");
+          li.innerHTML = `<span class="track-num">${i + 1}</span>
+            <span><span class="track-title">${esc(t.title)}</span>
+            <span class="track-artist"> — ${esc(t.artist)}</span></span>`;
+          trackList.appendChild(li);
+        });
+
+        resultEl.classList.add("visible");
+      } catch (err) {
+        clearTimeout(stepTimer1);
+        clearTimeout(stepTimer2);
+        clearTimeout(stepTimer3);
+        statusEl.classList.remove("visible");
+        errorEl.textContent = err.message;
+        errorEl.classList.add("visible");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

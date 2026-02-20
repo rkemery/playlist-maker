@@ -1,0 +1,7 @@
+anthropic
+flask
+gunicorn
+pydantic
+python-dotenv
+requests
+spotipy
