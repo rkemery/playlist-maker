@@ -8,6 +8,8 @@ An AI-powered Spotify playlist generator. Describe a vibe in plain English and i
 3. Claude curates the best-matching tracks from the results
 4. A playlist is created on your Spotify account
 
+![Screenshot](screenshot.png)
+
 Built with Flask, Claude (Anthropic API), and the Spotify Web API. Deployed on Azure App Service with GitHub Actions CI/CD.
 
 ## Tech Stack
