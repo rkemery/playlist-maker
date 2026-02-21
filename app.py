@@ -163,7 +163,7 @@ def curate_playlist(
     )
     response = client.messages.parse(
         model="claude-opus-4-6",
-        max_tokens=1024,
+        max_tokens=4096,
         messages=[
             {
                 "role": "user",
@@ -218,9 +218,16 @@ def generate():
     if not data or not data.get("prompt"):
         return jsonify({"error": "Missing 'prompt' field"}), 400
 
-    prompt = data["prompt"]
-    count = data.get("count", 20)
-    count = max(1, min(50, int(count)))
+    prompt = str(data["prompt"]).strip()
+    if not prompt:
+        return jsonify({"error": "Prompt cannot be empty."}), 400
+    if len(prompt) > 500:
+        return jsonify({"error": "Prompt is too long (max 500 characters)."}), 400
+
+    try:
+        count = max(1, min(50, int(data.get("count", 20))))
+    except (TypeError, ValueError):
+        count = 20
 
     try:
         spotify = get_spotify()
