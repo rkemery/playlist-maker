@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -23,14 +24,13 @@ logger = logging.getLogger(__name__)
 
 SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private"
+HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
+
+# Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
+_anthropic_client = anthropic.Anthropic()
 
 
 # --- Models ---
-
-class Song(pydantic.BaseModel):
-    title: str
-    artist: str
-
 
 class SearchQueries(pydantic.BaseModel):
     queries: list[str]
@@ -56,15 +56,18 @@ class SpotifyClient:
     def __init__(self, cache_path: str) -> None:
         self.auth = SpotifyOAuth(scope=SCOPES, cache_path=cache_path)
         self.session = requests.Session()
+        self._token_lock = threading.Lock()
         # Acquire token eagerly so the interactive browser auth happens once,
         # before any parallel threads try to use it.
         self.auth.get_access_token(as_dict=False)
 
     def _headers(self) -> dict[str, str]:
-        token = self.auth.get_access_token(as_dict=False)
+        with self._token_lock:
+            token = self.auth.get_access_token(as_dict=False)
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, max_retries: int = 3, **kwargs) -> dict:
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
         for attempt in range(max_retries):
             resp = self.session.request(
                 method, f"{SPOTIFY_API}/{path}", headers=self._headers(), **kwargs
@@ -112,10 +115,9 @@ class SpotifyClient:
 # --- AI Functions ---
 
 def generate_search_queries(prompt: str) -> list[str]:
-    client = anthropic.Anthropic()
-    response = client.messages.parse(
+    response = _anthropic_client.messages.parse(
         model="claude-sonnet-4-6",
-        max_tokens=512,
+        max_tokens=1024,
         messages=[
             {
                 "role": "user",
@@ -143,7 +145,11 @@ def discover_candidates(
     candidates: list[CandidateTrack] = []
 
     def _search(query: str) -> list[CandidateTrack]:
-        return spotify.search_tracks(query, limit=10)
+        try:
+            return spotify.search_tracks(query, limit=10)
+        except (requests.HTTPError, requests.Timeout) as e:
+            logger.warning(f"Search failed for query '{query}': {e}")
+            return []
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for results in pool.map(_search, queries):
@@ -157,11 +163,10 @@ def discover_candidates(
 def curate_playlist(
     prompt: str, candidates: list[CandidateTrack], count: int
 ) -> CuratedPlaylist:
-    client = anthropic.Anthropic()
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
     )
-    response = client.messages.parse(
+    response = _anthropic_client.messages.parse(
         model="claude-opus-4-6",
         max_tokens=4096,
         messages=[
@@ -189,19 +194,22 @@ def curate_playlist(
 # --- Initialize Spotify client at startup ---
 
 _spotify: Optional[SpotifyClient] = None
+_spotify_lock = threading.Lock()
 
 
 def get_spotify() -> SpotifyClient:
     global _spotify
     if _spotify is None:
-        # On Azure, the app runs from /tmp but persistent files are in /home/site/wwwroot
-        home_wwwroot = "/home/site/wwwroot"
-        if os.path.isdir(home_wwwroot):
-            cache_path = os.path.join(home_wwwroot, ".spotify_cache")
-        else:
-            cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spotify_cache")
-        _spotify = SpotifyClient(cache_path)
-        logger.info("Spotify client initialized.")
+        with _spotify_lock:
+            if _spotify is None:
+                # On Azure, the app runs from /tmp but persistent files are in /home/site/wwwroot
+                home_wwwroot = "/home/site/wwwroot"
+                if os.path.isdir(home_wwwroot):
+                    cache_path = os.path.join(home_wwwroot, ".spotify_cache")
+                else:
+                    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".spotify_cache")
+                _spotify = SpotifyClient(cache_path)
+                logger.info("Spotify client initialized.")
     return _spotify
 
 
@@ -231,9 +239,9 @@ def generate():
 
     try:
         spotify = get_spotify()
-    except Exception as e:
+    except Exception:
         logger.exception("Spotify auth failed")
-        return jsonify({"error": f"Spotify authentication error: {e}"}), 500
+        return jsonify({"error": "Spotify authentication failed. Please try again later."}), 500
 
     try:
         # Step 1: Generate search queries
@@ -277,12 +285,12 @@ def generate():
         return jsonify({"error": "Invalid Anthropic API key."}), 500
     except anthropic.APIConnectionError:
         return jsonify({"error": "Could not connect to Anthropic API."}), 500
-    except requests.HTTPError as e:
+    except requests.HTTPError:
         logger.exception("Spotify API error")
-        return jsonify({"error": f"Spotify API error: {e}"}), 500
-    except Exception as e:
+        return jsonify({"error": "Spotify API error. Please try again."}), 500
+    except Exception:
         logger.exception("Unexpected error")
-        return jsonify({"error": f"Unexpected error: {e}"}), 500
+        return jsonify({"error": "Something went wrong. Please try again."}), 500
 
 
 if __name__ == "__main__":

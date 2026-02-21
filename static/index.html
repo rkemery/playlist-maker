@@ -201,16 +201,35 @@
       const stepTimer3 = setTimeout(() => setStep(3), 15000);
 
       try {
-        const resp = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, count }),
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 180000); // 3 min timeout
+
+        let resp;
+        try {
+          resp = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, count }),
+            signal: controller.signal,
+          });
+        } catch (fetchErr) {
+          if (fetchErr.name === "AbortError") {
+            throw new Error("Request timed out. Please try again.");
+          }
+          throw new Error("Could not connect to the server.");
+        } finally {
+          clearTimeout(timeout);
+        }
         clearTimeout(stepTimer1);
         clearTimeout(stepTimer2);
         clearTimeout(stepTimer3);
 
-        const data = await resp.json();
+        let data;
+        try {
+          data = await resp.json();
+        } catch {
+          throw new Error("Server returned an invalid response. Please try again.");
+        }
         if (!resp.ok) {
           throw new Error(data.error || "Something went wrong");
         }
