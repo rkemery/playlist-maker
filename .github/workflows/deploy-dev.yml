@@ -1,0 +1,19 @@
+name: Deploy to Azure App Service (Dev)
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Azure Web App (Dev)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: rkemery-playlist-maker-dev
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_DEV }}
