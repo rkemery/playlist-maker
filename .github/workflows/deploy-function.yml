@@ -2,7 +2,7 @@ name: Deploy Daily Image Function
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "daily_image_function/**"
   workflow_dispatch:

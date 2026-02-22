@@ -2,6 +2,7 @@ name: Provision Azure Resources
 
 on:
   workflow_dispatch:
+    branches: [main, dev]
     inputs:
       resource_group:
         description: "Azure Resource Group name"
