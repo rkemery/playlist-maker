@@ -1,0 +1,107 @@
+name: Provision Azure Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: "Azure Resource Group name"
+        required: true
+        default: "playlist-maker-rg"
+      location:
+        description: "Azure region"
+        required: true
+        default: "eastus"
+      storage_account:
+        description: "Storage account name (globally unique, lowercase, no hyphens)"
+        required: true
+        default: "playlistmakerimages"
+      function_app_name:
+        description: "Function App name"
+        required: true
+        default: "playlist-maker-daily-image"
+
+env:
+  CONTAINER_NAME: playlist-maker-images
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Resource Group
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az group create \
+              --name ${{ inputs.resource_group }} \
+              --location ${{ inputs.location }}
+
+      - name: Create Storage Account
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage account create \
+              --name ${{ inputs.storage_account }} \
+              --resource-group ${{ inputs.resource_group }} \
+              --location ${{ inputs.location }} \
+              --sku Standard_LRS \
+              --kind StorageV2 \
+              --allow-blob-public-access true
+
+      - name: Create Blob Container (public read)
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name ${{ inputs.storage_account }} \
+              --public-access blob
+
+      - name: Create Function App
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az functionapp create \
+              --name ${{ inputs.function_app_name }} \
+              --resource-group ${{ inputs.resource_group }} \
+              --storage-account ${{ inputs.storage_account }} \
+              --consumption-plan-location ${{ inputs.location }} \
+              --runtime python \
+              --runtime-version 3.9 \
+              --functions-version 4 \
+              --os-type Linux
+
+      - name: Configure Function App Settings
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            # Get storage connection string
+            CONN_STR=$(az storage account show-connection-string \
+              --name ${{ inputs.storage_account }} \
+              --resource-group ${{ inputs.resource_group }} \
+              --query connectionString -o tsv)
+
+            az functionapp config appsettings set \
+              --name ${{ inputs.function_app_name }} \
+              --resource-group ${{ inputs.resource_group }} \
+              --settings \
+                "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" \
+                "AZURE_STORAGE_CONNECTION_STRING=$CONN_STR"
+
+      - name: Get Publish Profile and Blob URL
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            BLOB_URL="https://${{ inputs.storage_account }}.blob.core.windows.net/$CONTAINER_NAME/daily-bg.webp"
+            echo "::notice::Daily image blob URL: $BLOB_URL"
+            echo "::notice::Set DAILY_IMAGE_URL=$BLOB_URL in your web app environment"
+            echo ""
+            echo "=== Next steps ==="
+            echo "1. Add AZURE_FUNCTIONAPP_PUBLISH_PROFILE secret from:"
+            echo "   az webapp deployment list-publishing-profiles --name ${{ inputs.function_app_name }} --resource-group ${{ inputs.resource_group }} --xml"
+            echo "2. Set DAILY_IMAGE_URL=$BLOB_URL in your web app's environment"
+            echo "3. Push to main to trigger the deploy-function workflow"
