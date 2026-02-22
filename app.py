@@ -151,7 +151,15 @@ def build_prompt(
 
 # --- AI Functions ---
 
-def generate_search_queries(prompt: str) -> list[str]:
+def generate_search_queries(prompt: str, count: int = 20) -> list[str]:
+    # Scale query count for larger playlists to build a bigger candidate pool
+    if count <= 20:
+        query_range = "8-12"
+    elif count <= 35:
+        query_range = "12-16"
+    else:
+        query_range = "16-20"
+
     response = _anthropic_client.messages.parse(
         model="claude-sonnet-4-6",
         max_tokens=1024,
@@ -160,12 +168,14 @@ def generate_search_queries(prompt: str) -> list[str]:
                 "role": "user",
                 "content": (
                     f"I want to build a Spotify playlist for: \"{prompt}\"\n\n"
-                    "Generate 8-12 diverse Spotify search queries that would find tracks "
+                    f"Generate {query_range} diverse Spotify search queries that would find tracks "
                     "matching this vibe. Include variations like:\n"
                     "- Direct searches (e.g., \"final fantasy VII lofi\")\n"
                     "- Artist-specific searches for artists known in this space\n"
                     "- Genre + theme combinations\n"
                     "- Related keywords and synonyms\n\n"
+                    "If the prompt specifies an era or time period, make sure your queries "
+                    "reference artists, genres, and styles from that era.\n\n"
                     "Each query should be a real Spotify search string."
                 ),
             }
@@ -185,10 +195,13 @@ def discover_candidates(
     seen_uris: set[str] = set()
     candidates: list[CandidateTrack] = []
 
-    # Append Spotify year filter if era is set
+    # Run queries both WITH and WITHOUT year filter when era is set.
+    # The year-filtered queries find era-specific hits; the unfiltered queries
+    # provide fallback candidates that curation can still filter by era.
     if era_from is not None and era_to is not None:
         year_filter = f" year:{era_from}-{era_to}"
-        queries = [q + year_filter for q in queries]
+        filtered_queries = [q + year_filter for q in queries]
+        queries = filtered_queries + queries
 
     def _search(query: str) -> list[CandidateTrack]:
         try:
@@ -212,6 +225,19 @@ def curate_playlist(
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
     )
+
+    # When the candidate pool is small relative to the requested count,
+    # soften the curation to avoid returning only 2-3 tracks.
+    if len(candidates) < count * 2:
+        inclusivity_note = (
+            "\n\nIMPORTANT: The candidate pool is small relative to the requested "
+            f"count ({len(candidates)} candidates for {count} slots). Be more "
+            "inclusive — select tracks that are a reasonable fit, not just perfect "
+            "matches. It's better to fill the playlist than to be overly selective."
+        )
+    else:
+        inclusivity_note = ""
+
     response = _anthropic_client.messages.parse(
         model="claude-opus-4-6",
         max_tokens=4096,
@@ -229,6 +255,7 @@ def curate_playlist(
                     "- Prefer variety in artists when possible\n"
                     "- Return the spotify URIs of your selections in selected_uris\n\n"
                     "Also create a playlist name and description matching the mood."
+                    f"{inclusivity_note}"
                 ),
             }
         ],
@@ -346,8 +373,8 @@ def generate():
         return jsonify({"error": "Spotify authentication failed. Please try again later."}), 500
 
     try:
-        # Step 1: Generate search queries
-        queries = generate_search_queries(enriched_prompt)
+        # Step 1: Generate search queries (scaled by count for larger playlists)
+        queries = generate_search_queries(enriched_prompt, count=count)
         logger.info(f"Generated {len(queries)} search queries for: {prompt}")
 
         # Step 2: Search Spotify
