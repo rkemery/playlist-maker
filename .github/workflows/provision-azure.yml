@@ -72,7 +72,7 @@ jobs:
               --storage-account ${{ inputs.storage_account }} \
               --consumption-plan-location ${{ inputs.location }} \
               --runtime python \
-              --runtime-version 3.9 \
+              --runtime-version 3.11 \
               --functions-version 4 \
               --os-type Linux
 

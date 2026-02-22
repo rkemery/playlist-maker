@@ -9,7 +9,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: playlist-maker-daily-image
-  PYTHON_VERSION: "3.9"
+  PYTHON_VERSION: "3.11"
 
 jobs:
   deploy:
