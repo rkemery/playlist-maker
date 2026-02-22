@@ -13,7 +13,7 @@ import anthropic
 import pydantic
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from spotipy.oauth2 import SpotifyOAuth
 
 load_dotenv()
@@ -112,6 +112,43 @@ class SpotifyClient:
         return playlist["external_urls"]["spotify"]
 
 
+# --- Allowed values for mood/context ---
+
+ALLOWED_MOODS = {
+    "happy", "melancholy", "nostalgic", "aggressive",
+    "dreamy", "romantic", "energetic", "peaceful",
+}
+ALLOWED_CONTEXTS = {
+    "working out", "cooking dinner", "long drive", "house party",
+    "falling asleep", "morning coffee", "studying", "date night",
+}
+ENERGY_LABELS = {1: "very low energy/calm", 2: "low energy/relaxed", 3: "moderate energy", 4: "high energy/upbeat", 5: "very high energy/intense"}
+
+
+def build_prompt(
+    prompt: str,
+    energy: Optional[int] = None,
+    moods: Optional[list[str]] = None,
+    context: Optional[str] = None,
+    era_from: Optional[int] = None,
+    era_to: Optional[int] = None,
+    seed: Optional[str] = None,
+) -> str:
+    """Build an enriched prompt string from the base prompt and optional mood/context fields."""
+    parts = [prompt]
+    if energy is not None:
+        parts.append(f"Energy level: {ENERGY_LABELS.get(energy, 'moderate energy')}.")
+    if moods:
+        parts.append(f"Mood: {', '.join(moods)}.")
+    if context:
+        parts.append(f"Context/setting: {context}.")
+    if era_from is not None and era_to is not None:
+        parts.append(f"Era: only tracks from {era_from}-{era_to}.")
+    if seed:
+        parts.append(f"Use '{seed}' as a style/sound reference.")
+    return " ".join(parts)
+
+
 # --- AI Functions ---
 
 def generate_search_queries(prompt: str) -> list[str]:
@@ -139,10 +176,19 @@ def generate_search_queries(prompt: str) -> list[str]:
 
 
 def discover_candidates(
-    spotify: SpotifyClient, queries: list[str], max_workers: int = 5
+    spotify: SpotifyClient,
+    queries: list[str],
+    max_workers: int = 5,
+    era_from: Optional[int] = None,
+    era_to: Optional[int] = None,
 ) -> list[CandidateTrack]:
     seen_uris: set[str] = set()
     candidates: list[CandidateTrack] = []
+
+    # Append Spotify year filter if era is set
+    if era_from is not None and era_to is not None:
+        year_filter = f" year:{era_from}-{era_to}"
+        queries = [q + year_filter for q in queries]
 
     def _search(query: str) -> list[CandidateTrack]:
         try:
@@ -220,6 +266,14 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+@app.route("/api/daily-image")
+def daily_image():
+    url = os.environ.get("DAILY_IMAGE_URL")
+    if not url:
+        return "", 204
+    return redirect(url)
+
+
 @app.route("/api/generate", methods=["POST"])
 def generate():
     data = request.get_json()
@@ -237,6 +291,54 @@ def generate():
     except (TypeError, ValueError):
         count = 20
 
+    # Parse optional mood/context fields
+    energy = None
+    raw_energy = data.get("energy")
+    if raw_energy is not None:
+        try:
+            energy = int(raw_energy)
+            if energy < 1 or energy > 5:
+                return jsonify({"error": "Energy must be between 1 and 5."}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "Energy must be an integer."}), 400
+
+    moods = None
+    raw_moods = data.get("moods")
+    if raw_moods:
+        if not isinstance(raw_moods, list) or len(raw_moods) > 3:
+            return jsonify({"error": "Moods must be a list of up to 3 tags."}), 400
+        moods = [str(m).lower().strip() for m in raw_moods]
+        if any(m not in ALLOWED_MOODS for m in moods):
+            return jsonify({"error": f"Invalid mood. Allowed: {', '.join(sorted(ALLOWED_MOODS))}"}), 400
+
+    context = None
+    raw_context = data.get("context")
+    if raw_context:
+        context = str(raw_context).lower().strip()
+        if context not in ALLOWED_CONTEXTS:
+            return jsonify({"error": f"Invalid context. Allowed: {', '.join(sorted(ALLOWED_CONTEXTS))}"}), 400
+
+    era_from = None
+    era_to = None
+    raw_era_from = data.get("era_from")
+    raw_era_to = data.get("era_to")
+    if raw_era_from is not None and raw_era_to is not None:
+        try:
+            era_from = int(raw_era_from)
+            era_to = int(raw_era_to)
+            if era_from < 1900 or era_to > 2026 or era_from > era_to:
+                return jsonify({"error": "Invalid era range."}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "Era years must be integers."}), 400
+
+    seed = None
+    raw_seed = data.get("seed")
+    if raw_seed:
+        seed = str(raw_seed).strip()[:100] or None
+
+    # Build enriched prompt
+    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed)
+
     try:
         spotify = get_spotify()
     except Exception:
@@ -245,18 +347,18 @@ def generate():
 
     try:
         # Step 1: Generate search queries
-        queries = generate_search_queries(prompt)
+        queries = generate_search_queries(enriched_prompt)
         logger.info(f"Generated {len(queries)} search queries for: {prompt}")
 
         # Step 2: Search Spotify
-        candidates = discover_candidates(spotify, queries)
+        candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to)
         logger.info(f"Found {len(candidates)} unique candidate tracks")
 
         if not candidates:
             return jsonify({"error": "No tracks found on Spotify. Try a different prompt."}), 404
 
         # Step 3: Curate
-        curated = curate_playlist(prompt, candidates, count)
+        curated = curate_playlist(enriched_prompt, candidates, count)
 
         # Filter to valid URIs
         valid_uris = {c.uri for c in candidates}

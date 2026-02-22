@@ -16,6 +16,16 @@
       justify-content: center;
       padding: 40px 20px;
     }
+    .daily-bg {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: -1;
+      opacity: 0.12;
+      pointer-events: none;
+    }
     .container { max-width: 600px; width: 100%; }
     h1 { font-size: 2rem; margin-bottom: 8px; }
     .subtitle { color: #b3b3b3; margin-bottom: 24px; }
@@ -104,6 +114,95 @@
       text-align: center;
       font-weight: 600;
       font-size: 1rem;
+    }
+    .slider-labels { display: flex; justify-content: space-between; font-size: 0.75rem; color: #535353; margin-top: 2px; }
+
+    /* --- Customize toggle --- */
+    .customize-toggle {
+      background: none;
+      border: 1px solid #333;
+      color: #b3b3b3;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+      margin-bottom: 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .customize-toggle:hover { color: #fff; border-color: #1db954; }
+    .customize-toggle .arrow { transition: transform 0.2s; display: inline-block; font-size: 0.625rem; }
+    .customize-toggle.open .arrow { transform: rotate(90deg); }
+    .customize-section {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease, opacity 0.3s;
+      opacity: 0;
+    }
+    .customize-section.open { max-height: 800px; opacity: 1; }
+    .customize-inner { padding-bottom: 8px; }
+
+    /* --- Chips --- */
+    .chip-group { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      background: #1e1e1e;
+      color: #b3b3b3;
+      border: 1px solid #333;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      user-select: none;
+    }
+    .chip:hover { border-color: #1db954; color: #fff; }
+    .chip.active { background: #1db954; color: #fff; border-color: #1db954; }
+
+    /* --- Era range --- */
+    .era-toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .era-toggle input[type="checkbox"] { accent-color: #1db954; width: 16px; height: 16px; }
+    .era-range { display: flex; align-items: center; gap: 12px; }
+    .era-range input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: #333;
+      border-radius: 2px;
+      outline: none;
+    }
+    .era-range input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+    }
+    .era-range input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+      border: none;
+    }
+    .era-display {
+      min-width: 100px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 0.875rem;
+      color: #b3b3b3;
+    }
+    .era-inputs { display: flex; gap: 8px; align-items: center; }
+    .era-inputs input[type="range"] { flex: 1; }
+
+    /* --- Seed input --- */
+    input[type="text"].seed-input {
+      padding-right: 16px;
+      font-size: 0.875rem;
     }
 
     /* --- Button --- */
@@ -241,6 +340,7 @@
   </style>
 </head>
 <body>
+  <img class="daily-bg" src="/api/daily-image" alt="" loading="lazy" onerror="this.remove()">
   <div class="container">
     <h1>Playlist Maker</h1>
     <p class="subtitle">Describe a vibe and AI will create a Spotify playlist for you.</p>
@@ -262,6 +362,73 @@
             <span class="char-count" id="charCount">0 / 500</span>
           </div>
         </div>
+        <button type="button" class="customize-toggle" id="customizeToggle">
+          <span class="arrow">&#9654;</span> Customize
+        </button>
+        <div class="customize-section" id="customizeSection">
+          <div class="customize-inner">
+            <!-- Energy slider -->
+            <div class="form-group">
+              <label>Energy</label>
+              <div class="slider-group">
+                <input type="range" id="energy" min="1" max="5" value="3">
+                <span class="slider-value" id="energyValue">3</span>
+              </div>
+              <div class="slider-labels"><span>Calm</span><span>Intense</span></div>
+            </div>
+
+            <!-- Mood chips -->
+            <div class="form-group">
+              <label>Mood <span style="font-weight:400;color:#535353">(up to 3)</span></label>
+              <div class="chip-group" id="moodChips">
+                <button type="button" class="chip" data-mood="happy">Happy</button>
+                <button type="button" class="chip" data-mood="melancholy">Melancholy</button>
+                <button type="button" class="chip" data-mood="nostalgic">Nostalgic</button>
+                <button type="button" class="chip" data-mood="aggressive">Aggressive</button>
+                <button type="button" class="chip" data-mood="dreamy">Dreamy</button>
+                <button type="button" class="chip" data-mood="romantic">Romantic</button>
+                <button type="button" class="chip" data-mood="energetic">Energetic</button>
+                <button type="button" class="chip" data-mood="peaceful">Peaceful</button>
+              </div>
+            </div>
+
+            <!-- Context presets -->
+            <div class="form-group">
+              <label>Context</label>
+              <div class="chip-group" id="contextChips">
+                <button type="button" class="chip" data-context="working out">Working out</button>
+                <button type="button" class="chip" data-context="cooking dinner">Cooking dinner</button>
+                <button type="button" class="chip" data-context="long drive">Long drive</button>
+                <button type="button" class="chip" data-context="house party">House party</button>
+                <button type="button" class="chip" data-context="falling asleep">Falling asleep</button>
+                <button type="button" class="chip" data-context="morning coffee">Morning coffee</button>
+                <button type="button" class="chip" data-context="studying">Studying</button>
+                <button type="button" class="chip" data-context="date night">Date night</button>
+              </div>
+            </div>
+
+            <!-- Era range -->
+            <div class="form-group">
+              <label>Era</label>
+              <div class="era-toggle">
+                <input type="checkbox" id="eraEnabled">
+                <span id="eraLabel" style="color:#535353;font-size:0.875rem;">Any era</span>
+              </div>
+              <div class="era-inputs" id="eraInputs" style="display:none;">
+                <input type="range" id="eraFrom" min="1950" max="2026" value="1950">
+                <span class="era-display" id="eraDisplay">1950 — 2026</span>
+                <input type="range" id="eraTo" min="1950" max="2026" value="2026">
+              </div>
+            </div>
+
+            <!-- Seed input -->
+            <div class="form-group">
+              <label for="seed">Seed artist / track</label>
+              <input type="text" id="seed" class="seed-input" placeholder="e.g. Khruangbin, Bohemian Rhapsody" maxlength="100">
+            </div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label for="count">Number of tracks</label>
           <div class="slider-group">
@@ -315,6 +482,97 @@
       document.getElementById("step3"),
       document.getElementById("step4"),
     ];
+
+    // --- Customize toggle ---
+    const customizeToggle = document.getElementById("customizeToggle");
+    const customizeSection = document.getElementById("customizeSection");
+    customizeToggle.addEventListener("click", () => {
+      customizeToggle.classList.toggle("open");
+      customizeSection.classList.toggle("open");
+    });
+
+    // --- Energy slider ---
+    const energySlider = document.getElementById("energy");
+    const energyValue = document.getElementById("energyValue");
+    let energyTouched = false;
+    energySlider.addEventListener("input", () => {
+      energyTouched = true;
+      energyValue.textContent = energySlider.value;
+    });
+
+    // --- Mood chips (max 3) ---
+    const selectedMoods = [];
+    document.querySelectorAll("#moodChips .chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        const mood = chip.dataset.mood;
+        const idx = selectedMoods.indexOf(mood);
+        if (idx !== -1) {
+          selectedMoods.splice(idx, 1);
+          chip.classList.remove("active");
+        } else {
+          if (selectedMoods.length >= 3) {
+            const oldest = selectedMoods.shift();
+            document.querySelector(`#moodChips .chip[data-mood="${oldest}"]`).classList.remove("active");
+          }
+          selectedMoods.push(mood);
+          chip.classList.add("active");
+        }
+      });
+    });
+
+    // --- Context presets (single-select, toggle off) ---
+    let selectedContext = null;
+    document.querySelectorAll("#contextChips .chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        const ctx = chip.dataset.context;
+        if (selectedContext === ctx) {
+          selectedContext = null;
+          chip.classList.remove("active");
+        } else {
+          document.querySelectorAll("#contextChips .chip").forEach(c => c.classList.remove("active"));
+          selectedContext = ctx;
+          chip.classList.add("active");
+        }
+      });
+    });
+
+    // Auto-select context based on time of day
+    (function autoContext() {
+      const h = new Date().getHours();
+      let ctx = null;
+      if (h >= 5 && h < 9) ctx = "morning coffee";
+      else if (h >= 9 && h < 12) ctx = "studying";
+      else if (h >= 17 && h < 19) ctx = "cooking dinner";
+      else if (h >= 21 || h < 2) ctx = "falling asleep";
+      else if (h >= 19 && h < 21) ctx = "date night";
+      if (ctx) {
+        const chip = document.querySelector(`#contextChips .chip[data-context="${ctx}"]`);
+        if (chip) { chip.classList.add("active"); selectedContext = ctx; }
+      }
+    })();
+
+    // --- Era range ---
+    const eraEnabled = document.getElementById("eraEnabled");
+    const eraInputs = document.getElementById("eraInputs");
+    const eraFrom = document.getElementById("eraFrom");
+    const eraTo = document.getElementById("eraTo");
+    const eraDisplay = document.getElementById("eraDisplay");
+    const eraLabel = document.getElementById("eraLabel");
+
+    eraEnabled.addEventListener("change", () => {
+      eraInputs.style.display = eraEnabled.checked ? "flex" : "none";
+      eraLabel.textContent = eraEnabled.checked ? "" : "Any era";
+      updateEraDisplay();
+    });
+    function updateEraDisplay() {
+      // Enforce from <= to
+      if (parseInt(eraFrom.value) > parseInt(eraTo.value)) {
+        eraTo.value = eraFrom.value;
+      }
+      eraDisplay.textContent = `${eraFrom.value} — ${eraTo.value}`;
+    }
+    eraFrom.addEventListener("input", updateEraDisplay);
+    eraTo.addEventListener("input", updateEraDisplay);
 
     // --- Slider ---
     countSlider.addEventListener("input", () => {
@@ -392,12 +650,24 @@
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 180000);
 
+        // Build payload with optional fields
+        const payload = { prompt, count };
+        if (energyTouched) payload.energy = parseInt(energySlider.value);
+        if (selectedMoods.length > 0) payload.moods = [...selectedMoods];
+        if (selectedContext) payload.context = selectedContext;
+        if (eraEnabled.checked) {
+          payload.era_from = parseInt(eraFrom.value);
+          payload.era_to = parseInt(eraTo.value);
+        }
+        const seedVal = document.getElementById("seed").value.trim();
+        if (seedVal) payload.seed = seedVal;
+
         let resp;
         try {
           resp = await fetch("/api/generate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt, count }),
+            body: JSON.stringify(payload),
             signal: controller.signal,
           });
         } catch (fetchErr) {

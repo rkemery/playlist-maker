@@ -1,0 +1,35 @@
+name: Deploy Daily Image Function
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "daily_image_function/**"
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: playlist-maker-daily-image
+  PYTHON_VERSION: "3.9"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r daily_image_function/requirements.txt
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: daily_image_function
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-remote: true
+          enable-oryx-build: true
