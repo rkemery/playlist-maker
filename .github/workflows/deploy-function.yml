@@ -27,13 +27,14 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies
-        run: pip install -r daily_image_function/requirements.txt
+      - name: Install dependencies into package
+        run: |
+          pushd daily_image_function
+          pip install --target .python_packages/lib/site-packages -r requirements.txt
+          popd
 
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: daily_image_function
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
