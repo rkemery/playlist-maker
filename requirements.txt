@@ -1,7 +1,7 @@
-anthropic
-flask
-gunicorn
-pydantic
-python-dotenv
-requests
-spotipy
+anthropic~=0.82
+flask~=3.1
+gunicorn~=23.0
+pydantic~=2.12
+python-dotenv~=1.2
+requests~=2.32
+spotipy~=2.25

@@ -7,7 +7,9 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 
 import anthropic
 import pydantic
@@ -68,10 +70,12 @@ class SpotifyClient:
 
     def _request(self, method: str, path: str, max_retries: int = 3, **kwargs) -> dict:
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        last_resp = None
         for attempt in range(max_retries):
             resp = self.session.request(
                 method, f"{SPOTIFY_API}/{path}", headers=self._headers(), **kwargs
             )
+            last_resp = resp
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", 1))
                 logger.warning(f"Rate limited, retrying in {retry_after}s...")
@@ -82,8 +86,9 @@ class SpotifyClient:
                 continue
             resp.raise_for_status()
             return resp.json() if resp.content else {}
-        resp.raise_for_status()
-        return {}
+        # All retries exhausted — raise the last response's error
+        last_resp.raise_for_status()
+        return {}  # unreachable, but satisfies type checker
 
     def search_tracks(self, query: str, limit: int = 10) -> list[CandidateTrack]:
         data = self._request(
@@ -97,19 +102,26 @@ class SpotifyClient:
             ))
         return candidates
 
-    def create_playlist(self, name: str, description: str, track_uris: list[str]) -> str:
+    def create_playlist(self, name: str, description: str, track_uris: list[str]) -> tuple[str, int]:
+        """Create a playlist and add tracks. Returns (url, tracks_added)."""
         playlist = self._request(
             "POST",
             "me/playlists",
             json={"name": name, "public": False, "description": description},
         )
+        tracks_added = 0
         for i in range(0, len(track_uris), 100):
-            self._request(
-                "POST",
-                f"playlists/{playlist['id']}/items",
-                json={"uris": track_uris[i : i + 100]},
-            )
-        return playlist["external_urls"]["spotify"]
+            batch = track_uris[i : i + 100]
+            try:
+                self._request(
+                    "POST",
+                    f"playlists/{playlist['id']}/items",
+                    json={"uris": batch},
+                )
+                tracks_added += len(batch)
+            except requests.HTTPError:
+                logger.warning(f"Failed to add batch starting at index {i}, skipping")
+        return playlist["external_urls"]["spotify"], tracks_added
 
 
 # --- Allowed values for mood/context ---
@@ -151,7 +163,7 @@ def build_prompt(
 
 # --- AI Functions ---
 
-def generate_search_queries(prompt: str, count: int = 20) -> list[str]:
+def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2) -> list[str]:
     # Scale query count for larger playlists to build a bigger candidate pool
     if count <= 20:
         query_range = "8-12"
@@ -160,29 +172,36 @@ def generate_search_queries(prompt: str, count: int = 20) -> list[str]:
     else:
         query_range = "16-20"
 
-    response = _anthropic_client.messages.parse(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"I want to build a Spotify playlist for: \"{prompt}\"\n\n"
-                    f"Generate {query_range} diverse Spotify search queries that would find tracks "
-                    "matching this vibe. Include variations like:\n"
-                    "- Direct searches (e.g., \"final fantasy VII lofi\")\n"
-                    "- Artist-specific searches for artists known in this space\n"
-                    "- Genre + theme combinations\n"
-                    "- Related keywords and synonyms\n\n"
-                    "If the prompt specifies an era or time period, make sure your queries "
-                    "reference artists, genres, and styles from that era.\n\n"
-                    "Each query should be a real Spotify search string."
-                ),
-            }
-        ],
-        output_format=SearchQueries,
-    )
-    return response.parsed_output.queries
+    for attempt in range(max_attempts):
+        try:
+            response = _anthropic_client.messages.parse(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"I want to build a Spotify playlist for: \"{prompt}\"\n\n"
+                            f"Generate {query_range} diverse Spotify search queries that would find tracks "
+                            "matching this vibe. Include variations like:\n"
+                            "- Direct searches (e.g., \"final fantasy VII lofi\")\n"
+                            "- Artist-specific searches for artists known in this space\n"
+                            "- Genre + theme combinations\n"
+                            "- Related keywords and synonyms\n\n"
+                            "If the prompt specifies an era or time period, make sure your queries "
+                            "reference artists, genres, and styles from that era.\n\n"
+                            "Each query should be a real Spotify search string."
+                        ),
+                    }
+                ],
+                output_format=SearchQueries,
+            )
+            return response.parsed_output.queries
+        except pydantic.ValidationError:
+            if attempt < max_attempts - 1:
+                logger.warning("Query generation returned unparseable output, retrying...")
+                continue
+            raise ValueError("Failed to generate search queries. Please try again.")
 
 
 def discover_candidates(
@@ -220,7 +239,7 @@ def discover_candidates(
 
 
 def curate_playlist(
-    prompt: str, candidates: list[CandidateTrack], count: int
+    prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2
 ) -> CuratedPlaylist:
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
@@ -238,30 +257,37 @@ def curate_playlist(
     else:
         inclusivity_note = ""
 
-    response = _anthropic_client.messages.parse(
-        model="claude-opus-4-6",
-        max_tokens=4096,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"I'm building a Spotify playlist for: \"{prompt}\"\n\n"
-                    f"Here are {len(candidates)} candidate tracks found on Spotify:\n"
-                    f"{track_list}\n\n"
-                    f"Select exactly {count} tracks (or fewer if not enough good matches) "
-                    "that best fit the requested vibe. Rules:\n"
-                    "- ONLY select tracks that genuinely match the prompt's theme/genre/mood\n"
-                    "- Skip any track that feels off-theme, even if it's a good song\n"
-                    "- Prefer variety in artists when possible\n"
-                    "- Return the spotify URIs of your selections in selected_uris\n\n"
-                    "Also create a playlist name and description matching the mood."
-                    f"{inclusivity_note}"
-                ),
-            }
-        ],
-        output_format=CuratedPlaylist,
-    )
-    return response.parsed_output
+    for attempt in range(max_attempts):
+        try:
+            response = _anthropic_client.messages.parse(
+                model="claude-opus-4-6",
+                max_tokens=4096,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"I'm building a Spotify playlist for: \"{prompt}\"\n\n"
+                            f"Here are {len(candidates)} candidate tracks found on Spotify:\n"
+                            f"{track_list}\n\n"
+                            f"Select exactly {count} tracks (or fewer if not enough good matches) "
+                            "that best fit the requested vibe. Rules:\n"
+                            "- ONLY select tracks that genuinely match the prompt's theme/genre/mood\n"
+                            "- Skip any track that feels off-theme, even if it's a good song\n"
+                            "- Prefer variety in artists when possible\n"
+                            "- Return the spotify URIs of your selections in selected_uris\n\n"
+                            "Also create a playlist name and description matching the mood."
+                            f"{inclusivity_note}"
+                        ),
+                    }
+                ],
+                output_format=CuratedPlaylist,
+            )
+            return response.parsed_output
+        except pydantic.ValidationError:
+            if attempt < max_attempts - 1:
+                logger.warning("Curation returned unparseable output, retrying...")
+                continue
+            raise ValueError("Failed to curate playlist. Please try again.")
 
 
 # --- Initialize Spotify client at startup ---
@@ -293,16 +319,33 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+TRUSTED_IMAGE_HOSTS = {"blob.core.windows.net", "windows.net"}
+
 @app.route("/api/daily-image")
 def daily_image():
     url = os.environ.get("DAILY_IMAGE_URL")
     if not url:
+        return "", 204
+    parsed = urlparse(url)
+    if not any(parsed.hostname and parsed.hostname.endswith(h) for h in TRUSTED_IMAGE_HOSTS):
+        logger.warning(f"Blocked redirect to untrusted host: {parsed.hostname}")
         return "", 204
     return redirect(url)
 
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
+    # CSRF protection: verify Origin or Referer matches our host
+    origin = request.headers.get("Origin") or ""
+    referer = request.headers.get("Referer") or ""
+    expected_host = request.host_url.rstrip("/")
+    if origin:
+        if not origin.rstrip("/") == expected_host:
+            return jsonify({"error": "Invalid request origin."}), 403
+    elif referer:
+        if not referer.startswith(expected_host):
+            return jsonify({"error": "Invalid request origin."}), 403
+
     data = request.get_json()
     if not data or not data.get("prompt"):
         return jsonify({"error": "Missing 'prompt' field"}), 400
@@ -353,7 +396,7 @@ def generate():
         try:
             era_from = int(raw_era_from)
             era_to = int(raw_era_to)
-            if era_from < 1900 or era_to > 2026 or era_from > era_to:
+            if era_from < 1900 or era_to > datetime.now().year or era_from > era_to:
                 return jsonify({"error": "Invalid era range."}), 400
         except (TypeError, ValueError):
             return jsonify({"error": "Era years must be integers."}), 400
@@ -382,7 +425,7 @@ def generate():
         logger.info(f"Found {len(candidates)} unique candidate tracks")
 
         if not candidates:
-            return jsonify({"error": "No tracks found on Spotify. Try a different prompt."}), 404
+            return jsonify({"error": "No tracks found on Spotify. Try a broader genre or more well-known artists."}), 404
 
         # Step 3: Curate
         curated = curate_playlist(enriched_prompt, candidates, count)
@@ -392,11 +435,12 @@ def generate():
         track_uris = [uri for uri in curated.selected_uris if uri in valid_uris]
 
         if not track_uris:
-            return jsonify({"error": "No matching tracks found. Try a different prompt."}), 404
+            return jsonify({"error": "No matching tracks passed curation. Try a broader prompt or different keywords."}), 404
 
         # Step 4: Create playlist
         uri_to_track = {c.uri: c for c in candidates}
-        url = spotify.create_playlist(curated.playlist_name, curated.description, track_uris)
+        url, tracks_added = spotify.create_playlist(curated.playlist_name, curated.description, track_uris)
+        logger.info(f"Created playlist '{curated.playlist_name}': {tracks_added}/{len(track_uris)} tracks added")
 
         tracks = [
             {"title": uri_to_track[uri].title, "artist": uri_to_track[uri].artist}
@@ -410,6 +454,8 @@ def generate():
             "tracks": tracks,
         })
 
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 500
     except anthropic.AuthenticationError:
         return jsonify({"error": "Invalid Anthropic API key."}), 500
     except anthropic.APIConnectionError:

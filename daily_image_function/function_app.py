@@ -47,44 +47,55 @@ BLOB_NAME = "daily-bg.webp"
 def generate_daily_image(timer: func.TimerRequest) -> None:
     """Generate a retro background image and upload to Azure Blob Storage."""
     if timer.past_due:
-        logger.info("Timer is past due, running anyway.")
+        logger.warning("Timer is past due, running anyway.")
 
-    # Pick prompt based on day of year
-    day_of_year = datetime.now(timezone.utc).timetuple().tm_yday
-    prompt = PROMPTS[day_of_year % len(PROMPTS)]
-    logger.info(f"Using prompt index {day_of_year % len(PROMPTS)}: {prompt[:60]}...")
+    try:
+        # Pick prompt based on day of year
+        day_of_year = datetime.now(timezone.utc).timetuple().tm_yday
+        prompt = PROMPTS[day_of_year % len(PROMPTS)]
+        logger.info(f"Using prompt index {day_of_year % len(PROMPTS)}: {prompt[:60]}...")
 
-    # Generate image via OpenAI
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    response = client.images.generate(
-        model="gpt-image-1-mini",
-        prompt=prompt,
-        n=1,
-        size="1536x1024",
-        quality="low",
-    )
+        # Generate image via OpenAI
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            logger.error("OPENAI_API_KEY not set, skipping image generation.")
+            return
+        client = OpenAI(api_key=api_key)
+        response = client.images.generate(
+            model="gpt-image-1-mini",
+            prompt=prompt,
+            n=1,
+            size="1536x1024",
+            quality="low",
+        )
 
-    # Decode base64 image data
-    image_data = base64.b64decode(response.data[0].b64_json)
-    logger.info(f"Generated image: {len(image_data)} bytes (PNG)")
+        # Decode base64 image data
+        image_data = base64.b64decode(response.data[0].b64_json)
+        logger.info(f"Generated image: {len(image_data)} bytes (PNG)")
 
-    # Convert PNG to WebP via Pillow for compression
-    img = Image.open(io.BytesIO(image_data))
-    webp_buffer = io.BytesIO()
-    img.save(webp_buffer, format="WEBP", quality=75)
-    webp_bytes = webp_buffer.getvalue()
-    logger.info(f"Compressed to WebP: {len(webp_bytes)} bytes")
+        # Convert PNG to WebP via Pillow for compression
+        img = Image.open(io.BytesIO(image_data))
+        webp_buffer = io.BytesIO()
+        img.save(webp_buffer, format="WEBP", quality=75)
+        webp_bytes = webp_buffer.getvalue()
+        logger.info(f"Compressed to WebP: {len(webp_bytes)} bytes")
 
-    # Upload to Azure Blob Storage
-    conn_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
-    blob_service = BlobServiceClient.from_connection_string(conn_str)
-    blob_client = blob_service.get_blob_client(CONTAINER_NAME, BLOB_NAME)
-    blob_client.upload_blob(
-        webp_bytes,
-        overwrite=True,
-        content_settings=ContentSettings(
-            content_type="image/webp",
-            cache_control="public, max-age=86400",
-        ),
-    )
-    logger.info(f"Uploaded {BLOB_NAME} to {CONTAINER_NAME}")
+        # Upload to Azure Blob Storage
+        conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        if not conn_str:
+            logger.error("AZURE_STORAGE_CONNECTION_STRING not set, skipping upload.")
+            return
+        blob_service = BlobServiceClient.from_connection_string(conn_str)
+        blob_client = blob_service.get_blob_client(CONTAINER_NAME, BLOB_NAME)
+        blob_client.upload_blob(
+            webp_bytes,
+            overwrite=True,
+            content_settings=ContentSettings(
+                content_type="image/webp",
+                cache_control="public, max-age=86400",
+            ),
+        )
+        logger.info(f"Uploaded {BLOB_NAME} to {CONTAINER_NAME}")
+
+    except Exception:
+        logger.exception("Daily image generation failed")

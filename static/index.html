@@ -565,9 +565,16 @@
       updateEraDisplay();
     });
     function updateEraDisplay() {
-      // Enforce from <= to
-      if (parseInt(eraFrom.value) > parseInt(eraTo.value)) {
-        eraTo.value = eraFrom.value;
+      // Clamp so from never exceeds to and vice versa
+      const from = parseInt(eraFrom.value);
+      const to = parseInt(eraTo.value);
+      if (from > to) {
+        // Whichever slider the user is dragging, clamp the other
+        if (document.activeElement === eraFrom) {
+          eraTo.value = eraFrom.value;
+        } else {
+          eraFrom.value = eraTo.value;
+        }
       }
       eraDisplay.textContent = `${eraFrom.value} — ${eraTo.value}`;
     }
@@ -628,12 +635,15 @@
     }
 
     // --- Submit ---
+    let isSubmitting = false;
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (isSubmitting) return;
       const prompt = promptInput.value.trim();
       const count = parseInt(countSlider.value) || 20;
       if (!prompt) return;
 
+      isSubmitting = true;
       btn.disabled = true;
       formSection.classList.add("dimmed");
       errorEl.classList.remove("visible");
@@ -642,13 +652,14 @@
       setStep(0);
       startTimer();
 
-      const stepTimer1 = setTimeout(() => setStep(1), 3000);
-      const stepTimer2 = setTimeout(() => setStep(2), 8000);
-      const stepTimer3 = setTimeout(() => setStep(3), 15000);
+      // Conservative step timers — real API calls typically take longer
+      const stepTimer1 = setTimeout(() => setStep(1), 5000);
+      const stepTimer2 = setTimeout(() => setStep(2), 15000);
+      const stepTimer3 = setTimeout(() => setStep(3), 30000);
 
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 180000);
+        const timeout = setTimeout(() => controller.abort(), 240000);
 
         // Build payload with optional fields
         const payload = { prompt, count };
@@ -722,6 +733,7 @@
         errorEl.textContent = err.message;
         errorEl.classList.add("visible");
       } finally {
+        isSubmitting = false;
         btn.disabled = false;
       }
     });
