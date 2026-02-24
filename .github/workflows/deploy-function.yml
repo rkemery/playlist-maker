@@ -1,0 +1,41 @@
+name: Deploy Daily Image Function
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "daily_image_function/**"
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: playlist-maker-daily-image
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create deployment zip
+        run: cd daily_image_function && zip -r ${{ github.workspace }}/func-deploy.zip .
+
+      - name: Deploy to Azure Functions
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az functionapp deployment source config-zip \
+              --name ${{ env.AZURE_FUNCTIONAPP_NAME }} \
+              --resource-group playlist-maker-rg \
+              --src ${{ github.workspace }}/func-deploy.zip \
+              --build-remote true

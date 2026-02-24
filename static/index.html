@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Playlist Maker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%231db954'/><path d='M35 30v40l35-20z' fill='white'/></svg>">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -15,15 +16,38 @@
       justify-content: center;
       padding: 40px 20px;
     }
+    .daily-bg {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: -1;
+      opacity: 0.12;
+      pointer-events: none;
+    }
     .container { max-width: 600px; width: 100%; }
-    h1 {
-      font-size: 2rem;
-      margin-bottom: 8px;
-    }
-    .subtitle {
+    h1 { font-size: 2rem; margin-bottom: 8px; }
+    .subtitle { color: #b3b3b3; margin-bottom: 24px; }
+
+    /* --- Examples --- */
+    .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+    .examples button {
+      background: #1e1e1e;
       color: #b3b3b3;
-      margin-bottom: 32px;
+      border: 1px solid #333;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      margin-top: 0;
     }
+    .examples button:hover { background: #282828; color: #fff; border-color: #1db954; }
+
+    /* --- Form --- */
+    .form-section { transition: opacity 0.3s; }
+    .form-section.dimmed { opacity: 0.3; pointer-events: none; }
     .form-group { margin-bottom: 16px; }
     label {
       display: block;
@@ -32,9 +56,20 @@
       margin-bottom: 6px;
       color: #b3b3b3;
     }
-    input[type="text"], input[type="number"] {
+    .prompt-wrap { position: relative; }
+    .char-count {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      font-size: 0.75rem;
+      color: #535353;
+      transition: color 0.2s;
+    }
+    .char-count.warn { color: #ff6b6b; }
+    input[type="text"] {
       width: 100%;
       padding: 12px 16px;
+      padding-right: 60px;
       border: 1px solid #333;
       border-radius: 8px;
       background: #1e1e1e;
@@ -43,9 +78,135 @@
       outline: none;
       transition: border-color 0.2s;
     }
-    input:focus { border-color: #1db954; }
-    input[type="number"] { width: 100px; }
-    button {
+    input[type="text"]:focus { border-color: #1db954; }
+
+    /* --- Slider --- */
+    .slider-group { display: flex; align-items: center; gap: 12px; }
+    .slider-group input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: #333;
+      border-radius: 2px;
+      outline: none;
+    }
+    .slider-group input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+    .slider-group input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+    .slider-group input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+      border: none;
+    }
+    .slider-value {
+      min-width: 32px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 1rem;
+    }
+    .slider-labels { display: flex; justify-content: space-between; font-size: 0.75rem; color: #535353; margin-top: 2px; }
+
+    /* --- Customize toggle --- */
+    .customize-toggle {
+      background: none;
+      border: 1px solid #333;
+      color: #b3b3b3;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+      margin-bottom: 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .customize-toggle:hover { color: #fff; border-color: #1db954; }
+    .customize-toggle .arrow { transition: transform 0.2s; display: inline-block; font-size: 0.625rem; }
+    .customize-toggle.open .arrow { transform: rotate(90deg); }
+    .customize-section {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease, opacity 0.3s;
+      opacity: 0;
+    }
+    .customize-section.open { max-height: 800px; opacity: 1; }
+    .customize-inner { padding-bottom: 8px; }
+
+    /* --- Chips --- */
+    .chip-group { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      background: #1e1e1e;
+      color: #b3b3b3;
+      border: 1px solid #333;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      user-select: none;
+    }
+    .chip:hover { border-color: #1db954; color: #fff; }
+    .chip.active { background: #1db954; color: #fff; border-color: #1db954; }
+
+    /* --- Era range --- */
+    .era-toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .era-toggle input[type="checkbox"] { accent-color: #1db954; width: 16px; height: 16px; }
+    .era-range { display: flex; align-items: center; gap: 12px; }
+    .era-range input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: #333;
+      border-radius: 2px;
+      outline: none;
+    }
+    .era-range input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+    }
+    .era-range input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+      border: none;
+    }
+    .era-display {
+      min-width: 100px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 0.875rem;
+      color: #b3b3b3;
+    }
+    .era-inputs { display: flex; gap: 8px; align-items: center; }
+    .era-inputs input[type="range"] { flex: 1; }
+
+    /* --- Seed input --- */
+    input[type="text"].seed-input {
+      padding-right: 16px;
+      font-size: 0.875rem;
+    }
+
+    /* --- Button --- */
+    .btn-primary {
       background: #1db954;
       color: #fff;
       border: none;
@@ -57,8 +218,10 @@
       margin-top: 8px;
       transition: background 0.2s, transform 0.1s;
     }
-    button:hover { background: #1ed760; transform: scale(1.02); }
-    button:disabled { background: #535353; cursor: not-allowed; transform: none; }
+    .btn-primary:hover { background: #1ed760; transform: scale(1.02); }
+    .btn-primary:disabled { background: #535353; cursor: not-allowed; transform: none; }
+
+    /* --- Status --- */
     .status {
       margin-top: 24px;
       padding: 16px;
@@ -66,7 +229,7 @@
       background: #1e1e1e;
       display: none;
     }
-    .status.visible { display: block; }
+    .status.visible { display: block; animation: fadeIn 0.3s; }
     .status .step {
       color: #b3b3b3;
       margin-bottom: 8px;
@@ -83,41 +246,79 @@
       border-radius: 50%;
       background: #333;
     }
+    .status .step.active { color: #fff; }
     .status .step.active::before { background: #1db954; animation: pulse 1s infinite; }
+    .status .step.done { color: #b3b3b3; }
     .status .step.done::before { background: #1db954; }
+    .timer {
+      margin-top: 12px;
+      text-align: center;
+      color: #535353;
+      font-size: 0.8125rem;
+      font-variant-numeric: tabular-nums;
+    }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.4; }
     }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* --- Result --- */
     .result {
       margin-top: 24px;
       display: none;
     }
-    .result.visible { display: block; }
+    .result.visible { display: block; animation: fadeIn 0.3s; }
     .result h2 { font-size: 1.25rem; margin-bottom: 4px; }
     .result .desc { color: #b3b3b3; margin-bottom: 16px; }
-    .result a {
-      display: inline-block;
+    .result-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    .btn-spotify {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       background: #1db954;
       color: #fff;
       text-decoration: none;
       padding: 10px 24px;
       border-radius: 24px;
       font-weight: 600;
-      margin-bottom: 20px;
+      animation: fadeIn 0.4s;
     }
-    .result a:hover { background: #1ed760; }
+    .btn-spotify:hover { background: #1ed760; }
+    .btn-another {
+      background: transparent;
+      color: #b3b3b3;
+      border: 1px solid #333;
+      padding: 10px 24px;
+      border-radius: 24px;
+      font-size: 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .btn-another:hover { color: #fff; border-color: #fff; }
     .track-list { list-style: none; }
     .track-list li {
       padding: 8px 0;
       border-bottom: 1px solid #282828;
       display: flex;
       gap: 8px;
+      opacity: 0;
+      animation: trackIn 0.3s forwards;
     }
     .track-list li:last-child { border-bottom: none; }
     .track-num { color: #b3b3b3; min-width: 24px; text-align: right; }
     .track-title { font-weight: 500; }
     .track-artist { color: #b3b3b3; }
+    @keyframes trackIn {
+      from { opacity: 0; transform: translateX(-8px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    /* --- Error --- */
     .error {
       margin-top: 24px;
       padding: 16px;
@@ -126,31 +327,125 @@
       color: #ff6b6b;
       display: none;
     }
-    .error.visible { display: block; }
+    .error.visible { display: block; animation: fadeIn 0.3s; }
+
+    /* --- Mobile --- */
+    @media (max-width: 480px) {
+      body { padding: 24px 16px; }
+      h1 { font-size: 1.5rem; }
+      .btn-primary, .btn-spotify, .btn-another { padding: 14px 28px; width: 100%; text-align: center; justify-content: center; }
+      .result-actions { flex-direction: column; }
+      .examples button { font-size: 0.75rem; padding: 5px 12px; }
+    }
   </style>
 </head>
 <body>
+  <img class="daily-bg" src="/api/daily-image" alt="" loading="lazy" onerror="this.remove()">
   <div class="container">
     <h1>Playlist Maker</h1>
     <p class="subtitle">Describe a vibe and AI will create a Spotify playlist for you.</p>
 
-    <form id="form">
-      <div class="form-group">
-        <label for="prompt">What kind of playlist do you want?</label>
-        <input type="text" id="prompt" placeholder="e.g. chill Sunday morning vibes" required>
-      </div>
-      <div class="form-group">
-        <label for="count">Number of tracks</label>
-        <input type="number" id="count" value="20" min="1" max="50">
-      </div>
-      <button type="submit" id="btn">Create Playlist</button>
-    </form>
+    <div class="examples">
+      <button type="button" data-prompt="chill lo-fi study beats">chill lo-fi study beats</button>
+      <button type="button" data-prompt="90s road trip sing-alongs">90s road trip</button>
+      <button type="button" data-prompt="dinner party jazz">dinner party jazz</button>
+      <button type="button" data-prompt="high energy workout bangers">workout bangers</button>
+      <button type="button" data-prompt="rainy day indie folk">rainy day indie</button>
+    </div>
+
+    <div class="form-section" id="formSection">
+      <form id="form">
+        <div class="form-group">
+          <label for="prompt">What kind of playlist do you want?</label>
+          <div class="prompt-wrap">
+            <input type="text" id="prompt" placeholder="e.g. chill Sunday morning vibes" maxlength="500" required>
+            <span class="char-count" id="charCount">0 / 500</span>
+          </div>
+        </div>
+        <button type="button" class="customize-toggle" id="customizeToggle">
+          <span class="arrow">&#9654;</span> Customize
+        </button>
+        <div class="customize-section" id="customizeSection">
+          <div class="customize-inner">
+            <!-- Energy slider -->
+            <div class="form-group">
+              <label>Energy</label>
+              <div class="slider-group">
+                <input type="range" id="energy" min="1" max="5" value="3">
+                <span class="slider-value" id="energyValue">3</span>
+              </div>
+              <div class="slider-labels"><span>Calm</span><span>Intense</span></div>
+            </div>
+
+            <!-- Mood chips -->
+            <div class="form-group">
+              <label>Mood <span style="font-weight:400;color:#535353">(up to 3)</span></label>
+              <div class="chip-group" id="moodChips">
+                <button type="button" class="chip" data-mood="happy">Happy</button>
+                <button type="button" class="chip" data-mood="melancholy">Melancholy</button>
+                <button type="button" class="chip" data-mood="nostalgic">Nostalgic</button>
+                <button type="button" class="chip" data-mood="aggressive">Aggressive</button>
+                <button type="button" class="chip" data-mood="dreamy">Dreamy</button>
+                <button type="button" class="chip" data-mood="romantic">Romantic</button>
+                <button type="button" class="chip" data-mood="energetic">Energetic</button>
+                <button type="button" class="chip" data-mood="peaceful">Peaceful</button>
+              </div>
+            </div>
+
+            <!-- Context presets -->
+            <div class="form-group">
+              <label>Context</label>
+              <div class="chip-group" id="contextChips">
+                <button type="button" class="chip" data-context="working out">Working out</button>
+                <button type="button" class="chip" data-context="cooking dinner">Cooking dinner</button>
+                <button type="button" class="chip" data-context="long drive">Long drive</button>
+                <button type="button" class="chip" data-context="house party">House party</button>
+                <button type="button" class="chip" data-context="falling asleep">Falling asleep</button>
+                <button type="button" class="chip" data-context="morning coffee">Morning coffee</button>
+                <button type="button" class="chip" data-context="studying">Studying</button>
+                <button type="button" class="chip" data-context="date night">Date night</button>
+              </div>
+            </div>
+
+            <!-- Era range -->
+            <div class="form-group">
+              <label>Era</label>
+              <div class="era-toggle">
+                <input type="checkbox" id="eraEnabled">
+                <span id="eraLabel" style="color:#535353;font-size:0.875rem;">Any era</span>
+              </div>
+              <div class="era-inputs" id="eraInputs" style="display:none;">
+                <input type="range" id="eraFrom" min="1950" max="2026" value="1950">
+                <span class="era-display" id="eraDisplay">1950 — 2026</span>
+                <input type="range" id="eraTo" min="1950" max="2026" value="2026">
+              </div>
+            </div>
+
+            <!-- Seed input -->
+            <div class="form-group">
+              <label for="seed">Seed artist / track</label>
+              <input type="text" id="seed" class="seed-input" placeholder="e.g. Khruangbin, Bohemian Rhapsody" maxlength="100">
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="count">Number of tracks</label>
+          <div class="slider-group">
+            <input type="range" id="count" min="1" max="50" value="20">
+            <span class="slider-value" id="countValue">20</span>
+          </div>
+        </div>
+        <button type="submit" class="btn-primary" id="btn">Create Playlist</button>
+      </form>
+    </div>
 
     <div class="status" id="status">
       <div class="step" id="step1">Generating search queries...</div>
       <div class="step" id="step2">Searching Spotify...</div>
       <div class="step" id="step3">Curating your playlist...</div>
       <div class="step" id="step4">Creating playlist on Spotify...</div>
+      <div class="timer" id="timer">0:00</div>
     </div>
 
     <div class="error" id="error"></div>
@@ -158,17 +453,29 @@
     <div class="result" id="result">
       <h2 id="playlistName"></h2>
       <p class="desc" id="playlistDesc"></p>
-      <a id="playlistLink" href="#" target="_blank">Open in Spotify</a>
+      <div class="result-actions">
+        <a class="btn-spotify" id="playlistLink" href="#" target="_blank">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
+          Open in Spotify
+        </a>
+        <button type="button" class="btn-another" id="btnAnother">Make another</button>
+      </div>
       <ul class="track-list" id="trackList"></ul>
     </div>
   </div>
 
   <script>
     const form = document.getElementById("form");
+    const formSection = document.getElementById("formSection");
     const btn = document.getElementById("btn");
     const statusEl = document.getElementById("status");
     const errorEl = document.getElementById("error");
     const resultEl = document.getElementById("result");
+    const promptInput = document.getElementById("prompt");
+    const countSlider = document.getElementById("count");
+    const countValue = document.getElementById("countValue");
+    const charCount = document.getElementById("charCount");
+    const timerEl = document.getElementById("timer");
     const steps = [
       document.getElementById("step1"),
       document.getElementById("step2"),
@@ -176,6 +483,135 @@
       document.getElementById("step4"),
     ];
 
+    // --- Customize toggle ---
+    const customizeToggle = document.getElementById("customizeToggle");
+    const customizeSection = document.getElementById("customizeSection");
+    customizeToggle.addEventListener("click", () => {
+      customizeToggle.classList.toggle("open");
+      customizeSection.classList.toggle("open");
+    });
+
+    // --- Energy slider ---
+    const energySlider = document.getElementById("energy");
+    const energyValue = document.getElementById("energyValue");
+    let energyTouched = false;
+    energySlider.addEventListener("input", () => {
+      energyTouched = true;
+      energyValue.textContent = energySlider.value;
+    });
+
+    // --- Mood chips (max 3) ---
+    const selectedMoods = [];
+    document.querySelectorAll("#moodChips .chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        const mood = chip.dataset.mood;
+        const idx = selectedMoods.indexOf(mood);
+        if (idx !== -1) {
+          selectedMoods.splice(idx, 1);
+          chip.classList.remove("active");
+        } else {
+          if (selectedMoods.length >= 3) {
+            const oldest = selectedMoods.shift();
+            document.querySelector(`#moodChips .chip[data-mood="${oldest}"]`).classList.remove("active");
+          }
+          selectedMoods.push(mood);
+          chip.classList.add("active");
+        }
+      });
+    });
+
+    // --- Context presets (single-select, toggle off) ---
+    let selectedContext = null;
+    document.querySelectorAll("#contextChips .chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        const ctx = chip.dataset.context;
+        if (selectedContext === ctx) {
+          selectedContext = null;
+          chip.classList.remove("active");
+        } else {
+          document.querySelectorAll("#contextChips .chip").forEach(c => c.classList.remove("active"));
+          selectedContext = ctx;
+          chip.classList.add("active");
+        }
+      });
+    });
+
+    // Auto-select context based on time of day
+    (function autoContext() {
+      const h = new Date().getHours();
+      let ctx = null;
+      if (h >= 5 && h < 9) ctx = "morning coffee";
+      else if (h >= 9 && h < 12) ctx = "studying";
+      else if (h >= 17 && h < 19) ctx = "cooking dinner";
+      else if (h >= 21 || h < 2) ctx = "falling asleep";
+      else if (h >= 19 && h < 21) ctx = "date night";
+      if (ctx) {
+        const chip = document.querySelector(`#contextChips .chip[data-context="${ctx}"]`);
+        if (chip) { chip.classList.add("active"); selectedContext = ctx; }
+      }
+    })();
+
+    // --- Era range ---
+    const eraEnabled = document.getElementById("eraEnabled");
+    const eraInputs = document.getElementById("eraInputs");
+    const eraFrom = document.getElementById("eraFrom");
+    const eraTo = document.getElementById("eraTo");
+    const eraDisplay = document.getElementById("eraDisplay");
+    const eraLabel = document.getElementById("eraLabel");
+
+    eraEnabled.addEventListener("change", () => {
+      eraInputs.style.display = eraEnabled.checked ? "flex" : "none";
+      eraLabel.textContent = eraEnabled.checked ? "" : "Any era";
+      updateEraDisplay();
+    });
+    function updateEraDisplay() {
+      // Clamp so from never exceeds to and vice versa
+      const from = parseInt(eraFrom.value);
+      const to = parseInt(eraTo.value);
+      if (from > to) {
+        // Whichever slider the user is dragging, clamp the other
+        if (document.activeElement === eraFrom) {
+          eraTo.value = eraFrom.value;
+        } else {
+          eraFrom.value = eraTo.value;
+        }
+      }
+      eraDisplay.textContent = `${eraFrom.value} — ${eraTo.value}`;
+    }
+    eraFrom.addEventListener("input", updateEraDisplay);
+    eraTo.addEventListener("input", updateEraDisplay);
+
+    // --- Slider ---
+    countSlider.addEventListener("input", () => {
+      countValue.textContent = countSlider.value;
+    });
+
+    // --- Character counter ---
+    promptInput.addEventListener("input", () => {
+      const len = promptInput.value.length;
+      charCount.textContent = `${len} / 500`;
+      charCount.classList.toggle("warn", len > 450);
+    });
+
+    // --- Example chips ---
+    document.querySelectorAll(".examples button").forEach(chip => {
+      chip.addEventListener("click", () => {
+        promptInput.value = chip.dataset.prompt;
+        promptInput.dispatchEvent(new Event("input"));
+        promptInput.focus();
+      });
+    });
+
+    // --- Make another ---
+    document.getElementById("btnAnother").addEventListener("click", () => {
+      resultEl.classList.remove("visible");
+      formSection.classList.remove("dimmed");
+      promptInput.value = "";
+      promptInput.dispatchEvent(new Event("input"));
+      promptInput.focus();
+    });
+
+    // --- Progress ---
     function setStep(n) {
       steps.forEach((s, i) => {
         s.classList.toggle("active", i === n);
@@ -183,42 +619,93 @@
       });
     }
 
+    let timerInterval = null;
+    function startTimer() {
+      let seconds = 0;
+      timerEl.textContent = "0:00";
+      timerInterval = setInterval(() => {
+        seconds++;
+        const m = Math.floor(seconds / 60);
+        const s = String(seconds % 60).padStart(2, "0");
+        timerEl.textContent = `${m}:${s}`;
+      }, 1000);
+    }
+    function stopTimer() {
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    }
+
+    // --- Submit ---
+    let isSubmitting = false;
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const prompt = document.getElementById("prompt").value.trim();
-      const count = parseInt(document.getElementById("count").value) || 20;
+      if (isSubmitting) return;
+      const prompt = promptInput.value.trim();
+      const count = parseInt(countSlider.value) || 20;
       if (!prompt) return;
 
+      isSubmitting = true;
       btn.disabled = true;
+      formSection.classList.add("dimmed");
       errorEl.classList.remove("visible");
       resultEl.classList.remove("visible");
       statusEl.classList.add("visible");
       setStep(0);
+      startTimer();
 
-      // Simulate progress steps (the backend does it all in one call)
-      const stepTimer1 = setTimeout(() => setStep(1), 3000);
-      const stepTimer2 = setTimeout(() => setStep(2), 8000);
-      const stepTimer3 = setTimeout(() => setStep(3), 15000);
+      // Conservative step timers — real API calls typically take longer
+      const stepTimer1 = setTimeout(() => setStep(1), 5000);
+      const stepTimer2 = setTimeout(() => setStep(2), 15000);
+      const stepTimer3 = setTimeout(() => setStep(3), 30000);
 
       try {
-        const resp = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, count }),
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 240000);
+
+        // Build payload with optional fields
+        const payload = { prompt, count };
+        if (energyTouched) payload.energy = parseInt(energySlider.value);
+        if (selectedMoods.length > 0) payload.moods = [...selectedMoods];
+        if (selectedContext) payload.context = selectedContext;
+        if (eraEnabled.checked) {
+          payload.era_from = parseInt(eraFrom.value);
+          payload.era_to = parseInt(eraTo.value);
+        }
+        const seedVal = document.getElementById("seed").value.trim();
+        if (seedVal) payload.seed = seedVal;
+
+        let resp;
+        try {
+          resp = await fetch("/api/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+        } catch (fetchErr) {
+          if (fetchErr.name === "AbortError") {
+            throw new Error("Request timed out. Please try again.");
+          }
+          throw new Error("Could not connect to the server.");
+        } finally {
+          clearTimeout(timeout);
+        }
         clearTimeout(stepTimer1);
         clearTimeout(stepTimer2);
         clearTimeout(stepTimer3);
 
-        const data = await resp.json();
+        let data;
+        try {
+          data = await resp.json();
+        } catch {
+          throw new Error("Server returned an invalid response. Please try again.");
+        }
         if (!resp.ok) {
           throw new Error(data.error || "Something went wrong");
         }
 
-        // Show all steps done
+        stopTimer();
         setStep(4);
 
-        // Display result
         document.getElementById("playlistName").textContent = data.playlist_name;
         document.getElementById("playlistDesc").textContent = data.description;
         document.getElementById("playlistLink").href = data.playlist_url;
@@ -227,21 +714,26 @@
         trackList.innerHTML = "";
         data.tracks.forEach((t, i) => {
           const li = document.createElement("li");
+          li.style.animationDelay = `${i * 0.04}s`;
           li.innerHTML = `<span class="track-num">${i + 1}</span>
             <span><span class="track-title">${esc(t.title)}</span>
             <span class="track-artist"> — ${esc(t.artist)}</span></span>`;
           trackList.appendChild(li);
         });
 
+        statusEl.classList.remove("visible");
         resultEl.classList.add("visible");
       } catch (err) {
         clearTimeout(stepTimer1);
         clearTimeout(stepTimer2);
         clearTimeout(stepTimer3);
+        stopTimer();
         statusEl.classList.remove("visible");
+        formSection.classList.remove("dimmed");
         errorEl.textContent = err.message;
         errorEl.classList.add("visible");
       } finally {
+        isSubmitting = false;
         btn.disabled = false;
       }
     });
