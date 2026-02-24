@@ -335,15 +335,19 @@ def daily_image():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    # CSRF protection: verify Origin or Referer matches our host
+    # CSRF protection: verify Origin or Referer hostname matches our host.
+    # Compare hostnames only — behind Azure's reverse proxy, the scheme and
+    # port in request.host_url may differ from the browser's Origin header.
     origin = request.headers.get("Origin") or ""
     referer = request.headers.get("Referer") or ""
-    expected_host = request.host_url.rstrip("/")
+    expected_host = request.host.split(":")[0]  # hostname without port
     if origin:
-        if not origin.rstrip("/") == expected_host:
+        origin_host = urlparse(origin).hostname or ""
+        if origin_host != expected_host:
             return jsonify({"error": "Invalid request origin."}), 403
     elif referer:
-        if not referer.startswith(expected_host):
+        referer_host = urlparse(referer).hostname or ""
+        if referer_host != expected_host:
             return jsonify({"error": "Invalid request origin."}), 403
 
     data = request.get_json()
