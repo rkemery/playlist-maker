@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
+from collections import defaultdict
+
 import anthropic
 import pydantic
 import requests
@@ -30,6 +32,24 @@ HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
+
+# Simple in-memory rate limiter: max 5 requests per IP per 60 seconds
+RATE_LIMIT_MAX = 5
+RATE_LIMIT_WINDOW = 60
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_rate_limit_lock = threading.Lock()
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    with _rate_limit_lock:
+        timestamps = _rate_limit_store[ip]
+        # Prune old entries
+        _rate_limit_store[ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+        if len(_rate_limit_store[ip]) >= RATE_LIMIT_MAX:
+            return True
+        _rate_limit_store[ip].append(now)
+        return False
 
 
 # --- Models ---
@@ -349,6 +369,12 @@ def generate():
         referer_host = urlparse(referer).hostname or ""
         if referer_host != expected_host:
             return jsonify({"error": "Invalid request origin."}), 403
+    else:
+        return jsonify({"error": "Invalid request origin."}), 403
+
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if _is_rate_limited(client_ip):
+        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
 
     data = request.get_json()
     if not data or not data.get("prompt"):
@@ -472,7 +498,11 @@ def generate():
         return jsonify({"error": "Something went wrong. Please try again."}), 500
 
 
-if __name__ == "__main__":
-    # Pre-initialize Spotify client on startup
+# Pre-initialize Spotify client on startup (works under both gunicorn and dev server)
+try:
     get_spotify()
+except Exception:
+    logger.warning("Spotify client init deferred — will retry on first request.")
+
+if __name__ == "__main__":
     app.run(debug=True, port=5000)

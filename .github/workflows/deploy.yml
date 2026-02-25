@@ -6,8 +6,26 @@ on:
       - main
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: pytest test_app.py -v
+
   deploy:
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
       - uses: actions/checkout@v4

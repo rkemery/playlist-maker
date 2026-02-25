@@ -708,7 +708,12 @@
 
         document.getElementById("playlistName").textContent = data.playlist_name;
         document.getElementById("playlistDesc").textContent = data.description;
-        document.getElementById("playlistLink").href = data.playlist_url;
+        const playlistUrl = data.playlist_url;
+        if (typeof playlistUrl === "string" && playlistUrl.startsWith("https://")) {
+          document.getElementById("playlistLink").href = playlistUrl;
+        } else {
+          document.getElementById("playlistLink").href = "#";
+        }
 
         const trackList = document.getElementById("trackList");
         trackList.innerHTML = "";
