@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -98,7 +99,11 @@ class SpotifyClient:
             last_resp = resp
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", 1))
-                logger.warning(f"Rate limited, retrying in {retry_after}s...")
+                if retry_after > 10:
+                    logger.warning(f"Rate limited for {retry_after}s, capping sleep at 10s")
+                    retry_after = 10
+                else:
+                    logger.warning(f"Rate limited, retrying in {retry_after}s...")
                 time.sleep(retry_after)
                 continue
             if resp.status_code >= 500 and attempt < max_retries - 1:
@@ -116,9 +121,13 @@ class SpotifyClient:
         )
         candidates = []
         for item in data.get("tracks", {}).get("items", []):
+            name = item.get("name")
+            uri = item.get("uri")
+            if not name or not uri:
+                continue
             artists = ", ".join(a["name"] for a in item.get("artists", []))
             candidates.append(CandidateTrack(
-                title=item["name"], artist=artists, uri=item["uri"]
+                title=name, artist=artists, uri=uri
             ))
         return candidates
 
@@ -129,19 +138,23 @@ class SpotifyClient:
             "me/playlists",
             json={"name": name, "public": False, "description": description},
         )
+        playlist_id = playlist.get("id")
+        playlist_url = playlist.get("external_urls", {}).get("spotify")
+        if not playlist_id or not playlist_url:
+            raise ValueError("Spotify returned a malformed playlist response (missing id or URL).")
         tracks_added = 0
         for i in range(0, len(track_uris), 100):
             batch = track_uris[i : i + 100]
             try:
                 self._request(
                     "POST",
-                    f"playlists/{playlist['id']}/items",
+                    f"playlists/{playlist_id}/items",
                     json={"uris": batch},
                 )
                 tracks_added += len(batch)
             except requests.HTTPError:
                 logger.warning(f"Failed to add batch starting at index {i}, skipping")
-        return playlist["external_urls"]["spotify"], tracks_added
+        return playlist_url, tracks_added
 
 
 # --- Allowed values for mood/context ---
@@ -175,7 +188,10 @@ def build_prompt(
     if context:
         parts.append(f"Context/setting: {context}.")
     if era_from is not None and era_to is not None:
-        parts.append(f"Era: only tracks from {era_from}-{era_to}.")
+        if era_from == era_to:
+            parts.append(f"Era: only tracks from the year {era_from}.")
+        else:
+            parts.append(f"Era: only tracks from {era_from}-{era_to}.")
     if seed:
         parts.append(f"Use '{seed}' as a style/sound reference.")
     return " ".join(parts)
@@ -238,7 +254,7 @@ def discover_candidates(
     # The year-filtered queries find era-specific hits; the unfiltered queries
     # provide fallback candidates that curation can still filter by era.
     if era_from is not None and era_to is not None:
-        year_filter = f" year:{era_from}-{era_to}"
+        year_filter = f" year:{era_from}" if era_from == era_to else f" year:{era_from}-{era_to}"
         filtered_queries = [q + year_filter for q in queries]
         queries = filtered_queries + queries
 
@@ -289,7 +305,7 @@ def curate_playlist(
                             f"I'm building a Spotify playlist for: \"{prompt}\"\n\n"
                             f"Here are {len(candidates)} candidate tracks found on Spotify:\n"
                             f"{track_list}\n\n"
-                            f"Select exactly {count} tracks (or fewer if not enough good matches) "
+                            f"Select exactly {count} {'track' if count == 1 else 'tracks'} (or fewer if not enough good matches) "
                             "that best fit the requested vibe. Rules:\n"
                             "- ONLY select tracks that genuinely match the prompt's theme/genre/mood\n"
                             "- Skip any track that feels off-theme, even if it's a good song\n"
@@ -380,7 +396,7 @@ def generate():
     if not data or not data.get("prompt"):
         return jsonify({"error": "Missing 'prompt' field"}), 400
 
-    prompt = str(data["prompt"]).strip()
+    prompt = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(data["prompt"])).strip()
     if not prompt:
         return jsonify({"error": "Prompt cannot be empty."}), 400
     if len(prompt) > 500:
@@ -477,12 +493,19 @@ def generate():
             for uri in track_uris if uri in uri_to_track
         ]
 
-        return jsonify({
+        response = {
             "playlist_url": url,
             "playlist_name": curated.playlist_name,
             "description": curated.description,
             "tracks": tracks,
-        })
+            "tracks_found": len(track_uris),
+        }
+        if len(track_uris) < count:
+            response["warning"] = (
+                f"Only {len(track_uris)} {'track' if len(track_uris) == 1 else 'tracks'} "
+                f"matched your criteria (you requested {count})."
+            )
+        return jsonify(response)
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 500

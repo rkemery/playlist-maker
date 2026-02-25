@@ -336,3 +336,216 @@ class TestGenerateEndpoint:
         )
         assert resp.status_code == 404
         assert "No tracks found" in resp.get_json()["error"]
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    @patch("app.curate_playlist")
+    def test_warning_when_fewer_tracks(self, mock_curate, mock_discover, mock_queries, mock_spotify, client):
+        """Issue #25: warning field when fewer tracks than requested."""
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = [
+            CandidateTrack(title="Song A", artist="Artist 1", uri="spotify:track:1"),
+        ]
+        mock_curate.return_value = CuratedPlaylist(
+            playlist_name="Test", description="Desc",
+            selected_uris=["spotify:track:1"],
+        )
+        mock_sp = MagicMock()
+        mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 1)
+        mock_spotify.return_value = mock_sp
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test", "count": 10},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "warning" in data
+        assert "1 track" in data["warning"]
+        assert data["tracks_found"] == 1
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    @patch("app.curate_playlist")
+    def test_no_warning_when_enough_tracks(self, mock_curate, mock_discover, mock_queries, mock_spotify, client):
+        """No warning when track count meets requested count."""
+        tracks = [
+            CandidateTrack(title=f"Song {i}", artist=f"Artist {i}", uri=f"spotify:track:{i}")
+            for i in range(2)
+        ]
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = tracks
+        mock_curate.return_value = CuratedPlaylist(
+            playlist_name="Test", description="Desc",
+            selected_uris=[t.uri for t in tracks],
+        )
+        mock_sp = MagicMock()
+        mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 2)
+        mock_spotify.return_value = mock_sp
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test", "count": 2},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 200
+        assert "warning" not in resp.get_json()
+
+
+# --- Issue #21: search_tracks missing fields ---
+
+class TestSearchTracksMissingFields:
+    def test_skips_items_without_name(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={
+            "tracks": {"items": [
+                {"artists": [{"name": "Artist"}], "uri": "spotify:track:1"},
+                {"name": "Good Song", "artists": [{"name": "Artist"}], "uri": "spotify:track:2"},
+            ]}
+        })
+        results = spotify_client.search_tracks("test")
+        assert len(results) == 1
+        assert results[0].title == "Good Song"
+
+    def test_skips_items_without_uri(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={
+            "tracks": {"items": [
+                {"name": "No URI Song", "artists": [{"name": "Artist"}]},
+                {"name": "Good Song", "artists": [{"name": "Artist"}], "uri": "spotify:track:2"},
+            ]}
+        })
+        results = spotify_client.search_tracks("test")
+        assert len(results) == 1
+        assert results[0].uri == "spotify:track:2"
+
+    def test_skips_items_with_empty_name(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={
+            "tracks": {"items": [
+                {"name": "", "artists": [{"name": "Artist"}], "uri": "spotify:track:1"},
+            ]}
+        })
+        results = spotify_client.search_tracks("test")
+        assert len(results) == 0
+
+
+# --- Issue #24: create_playlist malformed response ---
+
+class TestCreatePlaylistMalformedResponse:
+    def test_raises_on_missing_id(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={
+            "external_urls": {"spotify": "https://open.spotify.com/playlist/abc"},
+        })
+        with pytest.raises(ValueError, match="malformed"):
+            spotify_client.create_playlist("Test", "Desc", ["uri:1"])
+
+    def test_raises_on_missing_url(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={"id": "pl1"})
+        with pytest.raises(ValueError, match="malformed"):
+            spotify_client.create_playlist("Test", "Desc", ["uri:1"])
+
+    def test_raises_on_empty_response(self, spotify_client):
+        spotify_client._request = MagicMock(return_value={})
+        with pytest.raises(ValueError, match="malformed"):
+            spotify_client.create_playlist("Test", "Desc", ["uri:1"])
+
+
+# --- Issue #28: Unicode whitespace bypass ---
+
+class TestUnicodeWhitespace:
+    @pytest.fixture
+    def headers(self):
+        return {"Origin": "http://localhost"}
+
+    def test_nbsp_only_prompt_rejected(self, client, headers):
+        resp = client.post("/api/generate", json={"prompt": "\u00a0\u00a0"}, headers=headers)
+        assert resp.status_code == 400
+
+    def test_zero_width_space_prompt_rejected(self, client, headers):
+        resp = client.post("/api/generate", json={"prompt": "\u200b"}, headers=headers)
+        assert resp.status_code == 400
+
+    def test_bom_only_prompt_rejected(self, client, headers):
+        resp = client.post("/api/generate", json={"prompt": "\ufeff"}, headers=headers)
+        assert resp.status_code == 400
+
+    def test_mixed_unicode_whitespace_rejected(self, client, headers):
+        resp = client.post("/api/generate", json={"prompt": "  \u00a0\u200b\ufeff  "}, headers=headers)
+        assert resp.status_code == 400
+
+
+# --- Issue #27: Retry-After cap ---
+
+class TestRetryAfterCap:
+    @patch("app.time.sleep")
+    def test_caps_retry_after_at_10(self, mock_sleep, spotify_client):
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "60"}
+
+        success = MagicMock()
+        success.status_code = 200
+        success.content = b'{"ok": true}'
+        success.json.return_value = {"ok": True}
+
+        spotify_client.session.request = MagicMock(side_effect=[rate_limited, success])
+        result = spotify_client._request("GET", "search")
+        assert result == {"ok": True}
+        mock_sleep.assert_called_once_with(10)
+
+    @patch("app.time.sleep")
+    def test_does_not_cap_small_retry_after(self, mock_sleep, spotify_client):
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "3"}
+
+        success = MagicMock()
+        success.status_code = 200
+        success.content = b'{"ok": true}'
+        success.json.return_value = {"ok": True}
+
+        spotify_client.session.request = MagicMock(side_effect=[rate_limited, success])
+        spotify_client._request("GET", "search")
+        mock_sleep.assert_called_once_with(3)
+
+
+# --- Issue #29: Pluralization ---
+
+class TestPluralisation:
+    def test_count_1_uses_singular(self):
+        """curate_playlist prompt should say '1 track' not '1 tracks'."""
+        from app import curate_playlist
+        with patch("app._anthropic_client") as mock_client:
+            mock_response = MagicMock()
+            mock_response.parsed_output = CuratedPlaylist(
+                playlist_name="Solo", description="One", selected_uris=["uri:1"]
+            )
+            mock_client.messages.parse.return_value = mock_response
+            curate_playlist("test", [CandidateTrack(title="S", artist="A", uri="uri:1")], count=1)
+            call_args = mock_client.messages.parse.call_args
+            content = call_args[1]["messages"][0]["content"]
+            assert "1 track" in content
+            assert "1 tracks" not in content
+
+
+# --- Issue #22: Single-year era ---
+
+class TestSingleYearEra:
+    def test_build_prompt_single_year(self):
+        result = build_prompt("test", era_from=2000, era_to=2000)
+        assert "the year 2000" in result
+        assert "2000-2000" not in result
+
+    def test_build_prompt_range(self):
+        result = build_prompt("test", era_from=1990, era_to=1999)
+        assert "1990-1999" in result
+
+    def test_discover_single_year_filter(self, spotify_client):
+        spotify_client.search_tracks = MagicMock(return_value=[])
+        discover_candidates(spotify_client, ["q1"], max_workers=1, era_from=2000, era_to=2000)
+        # Should use "year:2000" not "year:2000-2000"
+        calls = spotify_client.search_tracks.call_args_list
+        filtered_query = calls[0][0][0]
+        assert "year:2000" in filtered_query
+        assert "year:2000-2000" not in filtered_query
