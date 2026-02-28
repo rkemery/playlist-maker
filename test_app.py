@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,11 +17,15 @@ from app import (
     SearchQueries,
     SpotifyClient,
     _check_deadline,
+    _get_nearby_holiday,
+    _get_season,
     _is_rate_limited,
     _rate_limit_store,
+    _thanksgiving,
     app,
     build_prompt,
     discover_candidates,
+    gather_context_signals,
 )
 
 
@@ -189,6 +194,14 @@ class TestBuildPrompt:
     def test_with_seed(self):
         result = build_prompt("test", seed="Khruangbin")
         assert "Khruangbin" in result
+
+    def test_with_context_signals(self):
+        result = build_prompt("test", context_signals="Current context: It is Monday morning.")
+        assert "Current context: It is Monday morning." in result
+
+    def test_context_signals_none_is_noop(self):
+        result = build_prompt("test", context_signals=None)
+        assert result == "test"
 
 
 # --- SpotifyClient ---
@@ -653,3 +666,273 @@ class TestAPIKeyAuth:
             headers={"X-API-Key": "some-key"},
         )
         assert resp.status_code == 401
+
+
+# --- Seasons ---
+
+class TestSeasons:
+    def test_winter(self):
+        assert _get_season(1, 15) == "winter"
+        assert _get_season(12, 25) == "winter"
+        assert _get_season(2, 28) == "winter"
+
+    def test_spring(self):
+        assert _get_season(3, 20) == "spring"
+        assert _get_season(4, 15) == "spring"
+        assert _get_season(5, 31) == "spring"
+
+    def test_summer(self):
+        assert _get_season(6, 21) == "summer"
+        assert _get_season(7, 15) == "summer"
+        assert _get_season(8, 31) == "summer"
+
+    def test_fall(self):
+        assert _get_season(9, 22) == "fall"
+        assert _get_season(10, 15) == "fall"
+        assert _get_season(11, 30) == "fall"
+
+    def test_boundary_spring_to_summer(self):
+        assert _get_season(6, 20) == "spring"
+        assert _get_season(6, 21) == "summer"
+
+    def test_boundary_fall_to_winter(self):
+        assert _get_season(12, 20) == "fall"
+        assert _get_season(12, 21) == "winter"
+
+
+# --- Holidays ---
+
+class TestHolidays:
+    def test_on_christmas(self):
+        result = _get_nearby_holiday(date(2026, 12, 25))
+        assert result is not None
+        assert "Christmas" in result
+        assert "Today is" in result
+
+    def test_near_halloween(self):
+        result = _get_nearby_holiday(date(2026, 10, 29))
+        assert result is not None
+        assert "Halloween" in result
+        assert "2 days" in result
+
+    def test_one_day_away(self):
+        result = _get_nearby_holiday(date(2026, 7, 3))
+        assert result is not None
+        assert "Independence Day" in result
+        assert "1 day" in result
+
+    def test_no_holiday(self):
+        result = _get_nearby_holiday(date(2026, 3, 10))
+        assert result is None
+
+    def test_thanksgiving_2026(self):
+        assert _thanksgiving(2026) == date(2026, 11, 26)
+
+    def test_thanksgiving_2025(self):
+        assert _thanksgiving(2025) == date(2025, 11, 27)
+
+    def test_on_thanksgiving(self):
+        result = _get_nearby_holiday(date(2026, 11, 26))
+        assert result is not None
+        assert "Thanksgiving" in result
+        assert "Today is" in result
+
+    def test_near_thanksgiving(self):
+        result = _get_nearby_holiday(date(2026, 11, 24))
+        assert result is not None
+        assert "Thanksgiving" in result
+        assert "2 days" in result
+
+    def test_lookahead_boundary(self):
+        # 5 days away from Christmas Eve should miss with default lookahead of 3
+        result = _get_nearby_holiday(date(2026, 12, 19))
+        assert result is None
+
+
+# --- gather_context_signals ---
+
+class TestGatherContextSignals:
+    @patch("app.datetime")
+    def test_basic_signal_generation(self, mock_dt):
+        from zoneinfo import ZoneInfo
+        mock_now = datetime(2026, 2, 28, 19, 42, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        result = gather_context_signals()
+        assert "Current context:" in result
+        assert "Saturday" in result
+        assert "evening" in result
+        assert "winter" in result
+        assert "February 28" in result
+
+    @patch("app.datetime")
+    def test_with_location_and_weather(self, mock_dt):
+        from zoneinfo import ZoneInfo
+        mock_now = datetime(2026, 7, 4, 14, 0, 0, tzinfo=ZoneInfo("America/Chicago"))
+        mock_dt.now.return_value = mock_now
+        result = gather_context_signals(
+            timezone="America/Chicago",
+            location="Chicago, IL",
+            weather="sunny, 85°F",
+        )
+        assert "Chicago, IL" in result
+        assert "sunny, 85°F" in result
+        assert "Independence Day" in result
+        assert "afternoon" in result
+        assert "summer" in result
+
+    @patch("app.datetime")
+    def test_morning_time(self, mock_dt):
+        from zoneinfo import ZoneInfo
+        mock_now = datetime(2026, 4, 15, 8, 30, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        result = gather_context_signals()
+        assert "morning" in result
+        assert "spring" in result
+
+    @patch("app.datetime")
+    def test_late_night_time(self, mock_dt):
+        from zoneinfo import ZoneInfo
+        mock_now = datetime(2026, 1, 10, 2, 0, 0, tzinfo=ZoneInfo("UTC"))
+        mock_dt.now.return_value = mock_now
+        result = gather_context_signals()
+        assert "late night" in result
+
+    def test_invalid_timezone_falls_back_to_utc(self):
+        # Should not raise
+        result = gather_context_signals(timezone="Invalid/Zone")
+        assert "Current context:" in result
+
+    def test_no_location_or_weather(self):
+        result = gather_context_signals()
+        assert "Location:" not in result
+        assert "Weather:" not in result
+
+
+# --- Context-aware endpoint ---
+
+class TestContextAwareEndpoint:
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    @patch("app.curate_playlist")
+    def test_context_aware_passes_signals_to_prompt(
+        self, mock_curate, mock_discover, mock_queries, mock_spotify, client
+    ):
+        mock_queries.return_value = ["q1"]
+        track = CandidateTrack(title="Song", artist="Artist", uri="spotify:track:1")
+        mock_discover.return_value = [track]
+        mock_curate.return_value = CuratedPlaylist(
+            playlist_name="Test", description="Desc",
+            selected_uris=["spotify:track:1"],
+        )
+        mock_sp = MagicMock()
+        mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 1)
+        mock_spotify.return_value = mock_sp
+
+        resp = client.post(
+            "/api/generate",
+            json={
+                "prompt": "chill vibes",
+                "context_aware": True,
+                "location": "Chicago, IL",
+                "weather": "snowy, 21°F",
+                "timezone": "America/Chicago",
+            },
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 200
+        # Verify the enriched prompt contains context signals
+        enriched = mock_queries.call_args[0][0]
+        assert "Current context:" in enriched
+        assert "Chicago, IL" in enriched
+        assert "snowy" in enriched
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_context_aware_false_ignores_signals(
+        self, mock_discover, mock_queries, mock_spotify, client
+    ):
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = []
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={
+                "prompt": "chill vibes",
+                "context_aware": False,
+                "location": "Chicago, IL",
+            },
+            headers={"Origin": "http://localhost"},
+        )
+        # Verify location is NOT in the enriched prompt
+        enriched = mock_queries.call_args[0][0]
+        assert "Current context:" not in enriched
+        assert "Chicago" not in enriched
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_context_aware_default_false(
+        self, mock_discover, mock_queries, mock_spotify, client
+    ):
+        """Omitting context_aware should behave like False."""
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = []
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "chill vibes"},
+            headers={"Origin": "http://localhost"},
+        )
+        enriched = mock_queries.call_args[0][0]
+        assert "Current context:" not in enriched
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_location_sanitized(
+        self, mock_discover, mock_queries, mock_spotify, client
+    ):
+        """Unicode whitespace in location should be normalized."""
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = []
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={
+                "prompt": "chill vibes",
+                "context_aware": True,
+                "location": "  \u200bChicago\u00a0 ",
+            },
+            headers={"Origin": "http://localhost"},
+        )
+        enriched = mock_queries.call_args[0][0]
+        assert "Chicago" in enriched
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_context_aware_without_optional_fields(
+        self, mock_discover, mock_queries, mock_spotify, client
+    ):
+        """context_aware=true with no location/weather/timezone should still work."""
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = []
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={
+                "prompt": "chill vibes",
+                "context_aware": True,
+            },
+            headers={"Origin": "http://localhost"},
+        )
+        enriched = mock_queries.call_args[0][0]
+        assert "Current context:" in enriched
+        assert "Location:" not in enriched
+        assert "Weather:" not in enriched

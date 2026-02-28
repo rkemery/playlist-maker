@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hmac
 import logging
 import os
@@ -9,9 +10,10 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from collections import defaultdict
 
@@ -188,6 +190,7 @@ def build_prompt(
     era_from: Optional[int] = None,
     era_to: Optional[int] = None,
     seed: Optional[str] = None,
+    context_signals: Optional[str] = None,
 ) -> str:
     """Build an enriched prompt string from the base prompt and optional mood/context fields."""
     parts = [prompt]
@@ -204,7 +207,106 @@ def build_prompt(
             parts.append(f"Era: only tracks from {era_from}-{era_to}.")
     if seed:
         parts.append(f"Use '{seed}' as a style/sound reference.")
+    if context_signals:
+        parts.append(context_signals)
     return " ".join(parts)
+
+
+# --- Context-aware helpers ---
+
+FIXED_HOLIDAYS = {
+    (1, 1): "New Year's Day",
+    (2, 14): "Valentine's Day",
+    (3, 17): "St. Patrick's Day",
+    (5, 5): "Cinco de Mayo",
+    (7, 4): "Independence Day",
+    (10, 31): "Halloween",
+    (12, 24): "Christmas Eve",
+    (12, 25): "Christmas",
+    (12, 31): "New Year's Eve",
+}
+
+
+def _thanksgiving(year: int) -> date:
+    """Return the date of Thanksgiving (4th Thursday of November) for a given year."""
+    nov1 = date(year, 11, 1)
+    # Thursday = weekday 3
+    offset = (3 - nov1.weekday()) % 7
+    return date(year, 11, 1 + offset + 21)
+
+
+def _get_nearby_holiday(today: date, lookahead_days: int = 3) -> Optional[str]:
+    """Return a description if today is on or within lookahead_days of a holiday."""
+    for delta in range(lookahead_days + 1):
+        check = today + timedelta(days=delta)
+        key = (check.month, check.day)
+        if key in FIXED_HOLIDAYS:
+            if delta == 0:
+                return f"Today is {FIXED_HOLIDAYS[key]}"
+            return f"{FIXED_HOLIDAYS[key]} is in {delta} day{'s' if delta != 1 else ''}"
+        if check == _thanksgiving(check.year):
+            if delta == 0:
+                return "Today is Thanksgiving"
+            return f"Thanksgiving is in {delta} day{'s' if delta != 1 else ''}"
+    return None
+
+
+def _get_season(month: int, day: int) -> str:
+    """Return the approximate season for the northern hemisphere."""
+    if (month == 3 and day >= 20) or month in (4, 5) or (month == 6 and day < 21):
+        return "spring"
+    if (month == 6 and day >= 21) or month in (7, 8) or (month == 9 and day < 22):
+        return "summer"
+    if (month == 9 and day >= 22) or month in (10, 11) or (month == 12 and day < 21):
+        return "fall"
+    return "winter"
+
+
+def _get_time_of_day(hour: int) -> str:
+    """Classify an hour into a time-of-day label."""
+    if 5 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    if 17 <= hour < 21:
+        return "evening"
+    return "late night"
+
+
+def gather_context_signals(
+    timezone: Optional[str] = None,
+    location: Optional[str] = None,
+    weather: Optional[str] = None,
+) -> str:
+    """Gather temporal and optional client context into a prompt-ready string."""
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except (KeyError, Exception):
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz)
+    today = now.date()
+
+    time_of_day = _get_time_of_day(now.hour)
+    day_name = calendar.day_name[today.weekday()]
+    season = _get_season(today.month, today.day)
+    time_str = now.strftime("%I:%M %p").lstrip("0")  # e.g. "7:42 PM"
+
+    parts = [
+        f"It is {day_name} {time_of_day} ({time_str}) in {season} "
+        f"({today.strftime('%B')} {today.day})."
+    ]
+
+    holiday = _get_nearby_holiday(today)
+    if holiday:
+        parts.append(f"{holiday}.")
+
+    if location:
+        parts.append(f"Location: {location}.")
+    if weather:
+        parts.append(f"Weather: {weather}.")
+
+    return "Current context: " + " ".join(parts)
 
 
 # --- AI Functions ---
@@ -480,8 +582,33 @@ def generate():
     if raw_seed:
         seed = str(raw_seed).strip()[:100] or None
 
+    # Parse context_aware flag and optional client-provided signals
+    context_aware = bool(data.get("context_aware", False))
+    context_signals = None
+    if context_aware:
+        raw_location = data.get("location")
+        ca_location = None
+        if raw_location:
+            ca_location = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(raw_location)).strip()[:200] or None
+
+        raw_weather = data.get("weather")
+        ca_weather = None
+        if raw_weather:
+            ca_weather = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(raw_weather)).strip()[:200] or None
+
+        raw_timezone = data.get("timezone")
+        ca_timezone = None
+        if raw_timezone:
+            ca_timezone = str(raw_timezone).strip()[:50] or None
+
+        context_signals = gather_context_signals(
+            timezone=ca_timezone,
+            location=ca_location,
+            weather=ca_weather,
+        )
+
     # Build enriched prompt
-    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed)
+    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed, context_signals=context_signals)
 
     try:
         spotify = get_spotify()
