@@ -396,6 +396,7 @@ def discover_candidates(
 def curate_playlist(
     prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2,
     deadline_start: Optional[float] = None,
+    context_signals: Optional[str] = None,
 ) -> CuratedPlaylist:
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
@@ -434,7 +435,15 @@ def curate_playlist(
                             "- Prefer variety in artists when possible\n"
                             "- Return the spotify URIs of your selections in selected_uris\n\n"
                             "Also create a playlist name and description matching the mood."
-                            f"{inclusivity_note}"
+                            + (
+                                f"\n\nThe listener's current context: {context_signals} "
+                                "Weave this context into the playlist name and description to make it "
+                                "feel personal and in-the-moment (e.g., reference the time of day, "
+                                "season, weather, or location if they add flavor). Don't force it — "
+                                "only use context that naturally fits."
+                                if context_signals else ""
+                            )
+                            + f"{inclusivity_note}"
                         ),
                     }
                 ],
@@ -606,6 +615,7 @@ def generate():
             location=ca_location,
             weather=ca_weather,
         )
+        logger.info(f"Context-aware mode: {context_signals}")
 
     # Build enriched prompt
     enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed, context_signals=context_signals)
@@ -621,7 +631,8 @@ def generate():
     try:
         # Step 1: Generate search queries (scaled by count for larger playlists)
         queries = generate_search_queries(enriched_prompt, count=count)
-        logger.info(f"Generated {len(queries)} search queries for: {prompt}")
+        ctx_tag = " [context-aware]" if context_signals else ""
+        logger.info(f"Generated {len(queries)} search queries for: {prompt}{ctx_tag}")
 
         # Step 2: Search Spotify
         candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to, deadline_start=deadline_start)
@@ -631,7 +642,7 @@ def generate():
             return jsonify({"error": "No tracks found on Spotify. Try a broader genre or more well-known artists."}), 404
 
         # Step 3: Curate
-        curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start)
+        curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start, context_signals=context_signals)
 
         # Filter to valid URIs
         valid_uris = {c.uri for c in candidates}
@@ -660,6 +671,7 @@ def generate():
             "description": curated.description,
             "tracks": tracks,
             "tracks_found": len(track_uris),
+            "context": context_signals,
         }
         if len(track_uris) < count:
             response["warning"] = (
