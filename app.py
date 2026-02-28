@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
+REQUEST_DEADLINE = 200  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
@@ -39,6 +40,13 @@ RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _rate_limit_lock = threading.Lock()
+
+
+def _check_deadline(start: float) -> None:
+    """Raise TimeoutError if the request deadline has been exceeded."""
+    elapsed = time.monotonic() - start
+    if elapsed >= REQUEST_DEADLINE:
+        raise TimeoutError(f"Request deadline exceeded ({elapsed:.0f}s >= {REQUEST_DEADLINE}s)")
 
 
 def _is_rate_limited(ip: str) -> bool:
@@ -246,6 +254,7 @@ def discover_candidates(
     max_workers: int = 5,
     era_from: Optional[int] = None,
     era_to: Optional[int] = None,
+    deadline_start: Optional[float] = None,
 ) -> list[CandidateTrack]:
     seen_uris: set[str] = set()
     candidates: list[CandidateTrack] = []
@@ -260,6 +269,8 @@ def discover_candidates(
 
     def _search(query: str) -> list[CandidateTrack]:
         try:
+            if deadline_start is not None:
+                _check_deadline(deadline_start)
             return spotify.search_tracks(query, limit=10)
         except (requests.HTTPError, requests.Timeout) as e:
             logger.warning(f"Search failed for query '{query}': {e}")
@@ -271,11 +282,16 @@ def discover_candidates(
                 if track.uri not in seen_uris:
                     seen_uris.add(track.uri)
                     candidates.append(track)
+
+    if deadline_start is not None:
+        _check_deadline(deadline_start)
+
     return candidates
 
 
 def curate_playlist(
-    prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2
+    prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2,
+    deadline_start: Optional[float] = None,
 ) -> CuratedPlaylist:
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
@@ -294,6 +310,8 @@ def curate_playlist(
         inclusivity_note = ""
 
     for attempt in range(max_attempts):
+        if deadline_start is not None:
+            _check_deadline(deadline_start)
         try:
             response = _anthropic_client.messages.parse(
                 model="claude-opus-4-6",
@@ -461,20 +479,22 @@ def generate():
         logger.exception("Spotify auth failed")
         return jsonify({"error": "Spotify authentication failed. Please try again later."}), 500
 
+    deadline_start = time.monotonic()
+
     try:
         # Step 1: Generate search queries (scaled by count for larger playlists)
         queries = generate_search_queries(enriched_prompt, count=count)
         logger.info(f"Generated {len(queries)} search queries for: {prompt}")
 
         # Step 2: Search Spotify
-        candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to)
+        candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to, deadline_start=deadline_start)
         logger.info(f"Found {len(candidates)} unique candidate tracks")
 
         if not candidates:
             return jsonify({"error": "No tracks found on Spotify. Try a broader genre or more well-known artists."}), 404
 
         # Step 3: Curate
-        curated = curate_playlist(enriched_prompt, candidates, count)
+        curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start)
 
         # Filter to valid URIs
         valid_uris = {c.uri for c in candidates}
@@ -507,6 +527,9 @@ def generate():
             )
         return jsonify(response)
 
+    except TimeoutError:
+        logger.warning(f"Request deadline exceeded for prompt: {prompt}")
+        return jsonify({"error": "Request took too long. Try a simpler prompt or fewer tracks."}), 504
     except ValueError as e:
         return jsonify({"error": str(e)}), 500
     except anthropic.AuthenticationError:

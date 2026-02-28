@@ -11,8 +11,10 @@ import requests
 from app import (
     CandidateTrack,
     CuratedPlaylist,
+    REQUEST_DEADLINE,
     SearchQueries,
     SpotifyClient,
+    _check_deadline,
     _is_rate_limited,
     _rate_limit_store,
     app,
@@ -549,3 +551,51 @@ class TestSingleYearEra:
         filtered_query = calls[0][0][0]
         assert "year:2000" in filtered_query
         assert "year:2000-2000" not in filtered_query
+
+
+# --- Request deadline ---
+
+class TestRequestDeadline:
+    def test_check_deadline_passes_when_within_limit(self):
+        _check_deadline(time.monotonic())  # should not raise
+
+    def test_check_deadline_raises_when_exceeded(self):
+        # Simulate a start time far in the past
+        with pytest.raises(TimeoutError):
+            _check_deadline(time.monotonic() - REQUEST_DEADLINE - 1)
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_timeout_during_search_returns_504(self, mock_discover, mock_queries, mock_spotify, client):
+        mock_queries.return_value = ["q1"]
+        mock_discover.side_effect = TimeoutError("deadline exceeded")
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 504
+        assert "too long" in resp.get_json()["error"]
+
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    @patch("app.curate_playlist")
+    def test_timeout_during_curation_returns_504(self, mock_curate, mock_discover, mock_queries, mock_spotify, client):
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = [
+            CandidateTrack(title="Song", artist="Artist", uri="spotify:track:1"),
+        ]
+        mock_curate.side_effect = TimeoutError("deadline exceeded")
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 504
+        assert "too long" in resp.get_json()["error"]
