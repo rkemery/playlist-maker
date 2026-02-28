@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from app import (
+    API_KEY,
     CandidateTrack,
     CuratedPlaylist,
     REQUEST_DEADLINE,
@@ -599,3 +600,55 @@ class TestRequestDeadline:
         )
         assert resp.status_code == 504
         assert "too long" in resp.get_json()["error"]
+
+
+# --- API key authentication ---
+
+class TestAPIKeyAuth:
+    @patch("app.API_KEY", "test-secret-key")
+    @patch("app.get_spotify")
+    @patch("app.generate_search_queries")
+    @patch("app.discover_candidates")
+    def test_valid_api_key_bypasses_csrf(self, mock_discover, mock_queries, mock_spotify, client):
+        """A valid X-API-Key header should bypass CSRF (no Origin needed)."""
+        mock_queries.return_value = ["q1"]
+        mock_discover.return_value = []
+        mock_spotify.return_value = MagicMock()
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "chill vibes"},
+            headers={"X-API-Key": "test-secret-key"},
+        )
+        # Should get past CSRF — 404 means "no tracks found" (not 403)
+        assert resp.status_code == 404
+        assert "No tracks found" in resp.get_json()["error"]
+
+    @patch("app.API_KEY", "test-secret-key")
+    def test_invalid_api_key_returns_401(self, client):
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test"},
+            headers={"X-API-Key": "wrong-key"},
+        )
+        assert resp.status_code == 401
+        assert "Invalid API key" in resp.get_json()["error"]
+
+    def test_missing_api_key_falls_through_to_csrf(self, client):
+        """Without X-API-Key, the existing CSRF check applies."""
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test"},
+        )
+        assert resp.status_code == 403
+        assert "Invalid request origin" in resp.get_json()["error"]
+
+    @patch("app.API_KEY", None)
+    def test_api_key_header_with_no_env_var_returns_401(self, client):
+        """If API_KEY env var is not set, any X-API-Key header is rejected."""
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "test"},
+            headers={"X-API-Key": "some-key"},
+        )
+        assert resp.status_code == 401

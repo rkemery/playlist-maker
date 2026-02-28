@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
 REQUEST_DEADLINE = 200  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
+API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access (Siri Shortcuts, etc.)
 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
@@ -389,22 +391,30 @@ def daily_image():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    # CSRF protection: verify Origin or Referer hostname matches our host.
-    # Compare hostnames only — behind Azure's reverse proxy, the scheme and
-    # port in request.host_url may differ from the browser's Origin header.
-    origin = request.headers.get("Origin") or ""
-    referer = request.headers.get("Referer") or ""
-    expected_host = request.host.split(":")[0]  # hostname without port
-    if origin:
-        origin_host = urlparse(origin).hostname or ""
-        if origin_host != expected_host:
-            return jsonify({"error": "Invalid request origin."}), 403
-    elif referer:
-        referer_host = urlparse(referer).hostname or ""
-        if referer_host != expected_host:
-            return jsonify({"error": "Invalid request origin."}), 403
+    # API key authentication — allows programmatic callers (Siri Shortcuts, etc.)
+    # to bypass CSRF. If the header is present it must be valid; if absent, fall
+    # through to the normal Origin/Referer CSRF check for browser requests.
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        if not API_KEY or not hmac.compare_digest(api_key, API_KEY):
+            return jsonify({"error": "Invalid API key."}), 401
     else:
-        return jsonify({"error": "Invalid request origin."}), 403
+        # CSRF protection: verify Origin or Referer hostname matches our host.
+        # Compare hostnames only — behind Azure's reverse proxy, the scheme and
+        # port in request.host_url may differ from the browser's Origin header.
+        origin = request.headers.get("Origin") or ""
+        referer = request.headers.get("Referer") or ""
+        expected_host = request.host.split(":")[0]  # hostname without port
+        if origin:
+            origin_host = urlparse(origin).hostname or ""
+            if origin_host != expected_host:
+                return jsonify({"error": "Invalid request origin."}), 403
+        elif referer:
+            referer_host = urlparse(referer).hostname or ""
+            if referer_host != expected_host:
+                return jsonify({"error": "Invalid request origin."}), 403
+        else:
+            return jsonify({"error": "Invalid request origin."}), 403
 
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
     if _is_rate_limited(client_ip):
