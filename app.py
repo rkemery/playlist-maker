@@ -523,8 +523,12 @@ def generate():
             for uri in track_uris if uri in uri_to_track
         ]
 
+        # Build spotify:// deep link from the web URL for mobile app integration
+        spotify_uri = url.replace("https://open.spotify.com/", "spotify://") if url else url
+
         response = {
             "playlist_url": url,
+            "spotify_uri": spotify_uri,
             "playlist_name": curated.playlist_name,
             "description": curated.description,
             "tracks": tracks,

@@ -322,6 +322,7 @@ class TestGenerateEndpoint:
         data = resp.get_json()
         assert data["playlist_name"] == "Chill Vibes"
         assert data["playlist_url"] == "https://open.spotify.com/playlist/abc"
+        assert data["spotify_uri"] == "spotify://playlist/abc"
         assert len(data["tracks"]) == 2
 
     @patch("app.get_spotify")
