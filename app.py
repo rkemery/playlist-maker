@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import calendar
+import hmac
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+
+from collections import defaultdict
 
 import anthropic
 import pydantic
@@ -27,9 +33,36 @@ logger = logging.getLogger(__name__)
 SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
+REQUEST_DEADLINE = 200  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
+API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access (Siri Shortcuts, etc.)
 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
+
+# Simple in-memory rate limiter: max 5 requests per IP per 60 seconds
+RATE_LIMIT_MAX = 5
+RATE_LIMIT_WINDOW = 60
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_rate_limit_lock = threading.Lock()
+
+
+def _check_deadline(start: float) -> None:
+    """Raise TimeoutError if the request deadline has been exceeded."""
+    elapsed = time.monotonic() - start
+    if elapsed >= REQUEST_DEADLINE:
+        raise TimeoutError(f"Request deadline exceeded ({elapsed:.0f}s >= {REQUEST_DEADLINE}s)")
+
+
+def _is_rate_limited(ip: str) -> bool:
+    now = time.time()
+    with _rate_limit_lock:
+        timestamps = _rate_limit_store[ip]
+        # Prune old entries
+        _rate_limit_store[ip] = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+        if len(_rate_limit_store[ip]) >= RATE_LIMIT_MAX:
+            return True
+        _rate_limit_store[ip].append(now)
+        return False
 
 
 # --- Models ---
@@ -78,7 +111,11 @@ class SpotifyClient:
             last_resp = resp
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", 1))
-                logger.warning(f"Rate limited, retrying in {retry_after}s...")
+                if retry_after > 10:
+                    logger.warning(f"Rate limited for {retry_after}s, capping sleep at 10s")
+                    retry_after = 10
+                else:
+                    logger.warning(f"Rate limited, retrying in {retry_after}s...")
                 time.sleep(retry_after)
                 continue
             if resp.status_code >= 500 and attempt < max_retries - 1:
@@ -96,9 +133,13 @@ class SpotifyClient:
         )
         candidates = []
         for item in data.get("tracks", {}).get("items", []):
+            name = item.get("name")
+            uri = item.get("uri")
+            if not name or not uri:
+                continue
             artists = ", ".join(a["name"] for a in item.get("artists", []))
             candidates.append(CandidateTrack(
-                title=item["name"], artist=artists, uri=item["uri"]
+                title=name, artist=artists, uri=uri
             ))
         return candidates
 
@@ -109,19 +150,23 @@ class SpotifyClient:
             "me/playlists",
             json={"name": name, "public": False, "description": description},
         )
+        playlist_id = playlist.get("id")
+        playlist_url = playlist.get("external_urls", {}).get("spotify")
+        if not playlist_id or not playlist_url:
+            raise ValueError("Spotify returned a malformed playlist response (missing id or URL).")
         tracks_added = 0
         for i in range(0, len(track_uris), 100):
             batch = track_uris[i : i + 100]
             try:
                 self._request(
                     "POST",
-                    f"playlists/{playlist['id']}/items",
+                    f"playlists/{playlist_id}/items",
                     json={"uris": batch},
                 )
                 tracks_added += len(batch)
             except requests.HTTPError:
                 logger.warning(f"Failed to add batch starting at index {i}, skipping")
-        return playlist["external_urls"]["spotify"], tracks_added
+        return playlist_url, tracks_added
 
 
 # --- Allowed values for mood/context ---
@@ -145,6 +190,7 @@ def build_prompt(
     era_from: Optional[int] = None,
     era_to: Optional[int] = None,
     seed: Optional[str] = None,
+    context_signals: Optional[str] = None,
 ) -> str:
     """Build an enriched prompt string from the base prompt and optional mood/context fields."""
     parts = [prompt]
@@ -155,10 +201,112 @@ def build_prompt(
     if context:
         parts.append(f"Context/setting: {context}.")
     if era_from is not None and era_to is not None:
-        parts.append(f"Era: only tracks from {era_from}-{era_to}.")
+        if era_from == era_to:
+            parts.append(f"Era: only tracks from the year {era_from}.")
+        else:
+            parts.append(f"Era: only tracks from {era_from}-{era_to}.")
     if seed:
         parts.append(f"Use '{seed}' as a style/sound reference.")
+    if context_signals:
+        parts.append(context_signals)
     return " ".join(parts)
+
+
+# --- Context-aware helpers ---
+
+FIXED_HOLIDAYS = {
+    (1, 1): "New Year's Day",
+    (2, 14): "Valentine's Day",
+    (3, 17): "St. Patrick's Day",
+    (5, 5): "Cinco de Mayo",
+    (7, 4): "Independence Day",
+    (10, 31): "Halloween",
+    (12, 24): "Christmas Eve",
+    (12, 25): "Christmas",
+    (12, 31): "New Year's Eve",
+}
+
+
+def _thanksgiving(year: int) -> date:
+    """Return the date of Thanksgiving (4th Thursday of November) for a given year."""
+    nov1 = date(year, 11, 1)
+    # Thursday = weekday 3
+    offset = (3 - nov1.weekday()) % 7
+    return date(year, 11, 1 + offset + 21)
+
+
+def _get_nearby_holiday(today: date, lookahead_days: int = 3) -> Optional[str]:
+    """Return a description if today is on or within lookahead_days of a holiday."""
+    for delta in range(lookahead_days + 1):
+        check = today + timedelta(days=delta)
+        key = (check.month, check.day)
+        if key in FIXED_HOLIDAYS:
+            if delta == 0:
+                return f"Today is {FIXED_HOLIDAYS[key]}"
+            return f"{FIXED_HOLIDAYS[key]} is in {delta} day{'s' if delta != 1 else ''}"
+        if check == _thanksgiving(check.year):
+            if delta == 0:
+                return "Today is Thanksgiving"
+            return f"Thanksgiving is in {delta} day{'s' if delta != 1 else ''}"
+    return None
+
+
+def _get_season(month: int, day: int) -> str:
+    """Return the approximate season for the northern hemisphere."""
+    if (month == 3 and day >= 20) or month in (4, 5) or (month == 6 and day < 21):
+        return "spring"
+    if (month == 6 and day >= 21) or month in (7, 8) or (month == 9 and day < 22):
+        return "summer"
+    if (month == 9 and day >= 22) or month in (10, 11) or (month == 12 and day < 21):
+        return "fall"
+    return "winter"
+
+
+def _get_time_of_day(hour: int) -> str:
+    """Classify an hour into a time-of-day label."""
+    if 5 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    if 17 <= hour < 21:
+        return "evening"
+    return "late night"
+
+
+def gather_context_signals(
+    timezone: Optional[str] = None,
+    location: Optional[str] = None,
+    weather: Optional[str] = None,
+) -> str:
+    """Gather temporal and optional client context into a prompt-ready string."""
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except (KeyError, Exception):
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz)
+    today = now.date()
+
+    time_of_day = _get_time_of_day(now.hour)
+    day_name = calendar.day_name[today.weekday()]
+    season = _get_season(today.month, today.day)
+    time_str = now.strftime("%I:%M %p").lstrip("0")  # e.g. "7:42 PM"
+
+    parts = [
+        f"It is {day_name} {time_of_day} ({time_str}) in {season} "
+        f"({today.strftime('%B')} {today.day})."
+    ]
+
+    holiday = _get_nearby_holiday(today)
+    if holiday:
+        parts.append(f"{holiday}.")
+
+    if location:
+        parts.append(f"Location: {location}.")
+    if weather:
+        parts.append(f"Weather: {weather}.")
+
+    return "Current context: " + " ".join(parts)
 
 
 # --- AI Functions ---
@@ -210,6 +358,7 @@ def discover_candidates(
     max_workers: int = 5,
     era_from: Optional[int] = None,
     era_to: Optional[int] = None,
+    deadline_start: Optional[float] = None,
 ) -> list[CandidateTrack]:
     seen_uris: set[str] = set()
     candidates: list[CandidateTrack] = []
@@ -218,12 +367,14 @@ def discover_candidates(
     # The year-filtered queries find era-specific hits; the unfiltered queries
     # provide fallback candidates that curation can still filter by era.
     if era_from is not None and era_to is not None:
-        year_filter = f" year:{era_from}-{era_to}"
+        year_filter = f" year:{era_from}" if era_from == era_to else f" year:{era_from}-{era_to}"
         filtered_queries = [q + year_filter for q in queries]
         queries = filtered_queries + queries
 
     def _search(query: str) -> list[CandidateTrack]:
         try:
+            if deadline_start is not None:
+                _check_deadline(deadline_start)
             return spotify.search_tracks(query, limit=10)
         except (requests.HTTPError, requests.Timeout) as e:
             logger.warning(f"Search failed for query '{query}': {e}")
@@ -235,11 +386,17 @@ def discover_candidates(
                 if track.uri not in seen_uris:
                     seen_uris.add(track.uri)
                     candidates.append(track)
+
+    if deadline_start is not None:
+        _check_deadline(deadline_start)
+
     return candidates
 
 
 def curate_playlist(
-    prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2
+    prompt: str, candidates: list[CandidateTrack], count: int, max_attempts: int = 2,
+    deadline_start: Optional[float] = None,
+    context_signals: Optional[str] = None,
 ) -> CuratedPlaylist:
     track_list = "\n".join(
         f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
@@ -258,6 +415,8 @@ def curate_playlist(
         inclusivity_note = ""
 
     for attempt in range(max_attempts):
+        if deadline_start is not None:
+            _check_deadline(deadline_start)
         try:
             response = _anthropic_client.messages.parse(
                 model="claude-opus-4-6",
@@ -269,14 +428,22 @@ def curate_playlist(
                             f"I'm building a Spotify playlist for: \"{prompt}\"\n\n"
                             f"Here are {len(candidates)} candidate tracks found on Spotify:\n"
                             f"{track_list}\n\n"
-                            f"Select exactly {count} tracks (or fewer if not enough good matches) "
+                            f"Select exactly {count} {'track' if count == 1 else 'tracks'} (or fewer if not enough good matches) "
                             "that best fit the requested vibe. Rules:\n"
                             "- ONLY select tracks that genuinely match the prompt's theme/genre/mood\n"
                             "- Skip any track that feels off-theme, even if it's a good song\n"
                             "- Prefer variety in artists when possible\n"
                             "- Return the spotify URIs of your selections in selected_uris\n\n"
                             "Also create a playlist name and description matching the mood."
-                            f"{inclusivity_note}"
+                            + (
+                                f"\n\nThe listener's current context: {context_signals} "
+                                "Weave this context into the playlist name and description to make it "
+                                "feel personal and in-the-moment (e.g., reference the time of day, "
+                                "season, weather, or location if they add flavor). Don't force it — "
+                                "only use context that naturally fits."
+                                if context_signals else ""
+                            )
+                            + f"{inclusivity_note}"
                         ),
                     }
                 ],
@@ -335,26 +502,40 @@ def daily_image():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    # CSRF protection: verify Origin or Referer hostname matches our host.
-    # Compare hostnames only — behind Azure's reverse proxy, the scheme and
-    # port in request.host_url may differ from the browser's Origin header.
-    origin = request.headers.get("Origin") or ""
-    referer = request.headers.get("Referer") or ""
-    expected_host = request.host.split(":")[0]  # hostname without port
-    if origin:
-        origin_host = urlparse(origin).hostname or ""
-        if origin_host != expected_host:
+    # API key authentication — allows programmatic callers (Siri Shortcuts, etc.)
+    # to bypass CSRF. If the header is present it must be valid; if absent, fall
+    # through to the normal Origin/Referer CSRF check for browser requests.
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        if not API_KEY or not hmac.compare_digest(api_key, API_KEY):
+            return jsonify({"error": "Invalid API key."}), 401
+    else:
+        # CSRF protection: verify Origin or Referer hostname matches our host.
+        # Compare hostnames only — behind Azure's reverse proxy, the scheme and
+        # port in request.host_url may differ from the browser's Origin header.
+        origin = request.headers.get("Origin") or ""
+        referer = request.headers.get("Referer") or ""
+        expected_host = request.host.split(":")[0]  # hostname without port
+        if origin:
+            origin_host = urlparse(origin).hostname or ""
+            if origin_host != expected_host:
+                return jsonify({"error": "Invalid request origin."}), 403
+        elif referer:
+            referer_host = urlparse(referer).hostname or ""
+            if referer_host != expected_host:
+                return jsonify({"error": "Invalid request origin."}), 403
+        else:
             return jsonify({"error": "Invalid request origin."}), 403
-    elif referer:
-        referer_host = urlparse(referer).hostname or ""
-        if referer_host != expected_host:
-            return jsonify({"error": "Invalid request origin."}), 403
+
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if _is_rate_limited(client_ip):
+        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
 
     data = request.get_json()
     if not data or not data.get("prompt"):
         return jsonify({"error": "Missing 'prompt' field"}), 400
 
-    prompt = str(data["prompt"]).strip()
+    prompt = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(data["prompt"])).strip()
     if not prompt:
         return jsonify({"error": "Prompt cannot be empty."}), 400
     if len(prompt) > 500:
@@ -410,8 +591,34 @@ def generate():
     if raw_seed:
         seed = str(raw_seed).strip()[:100] or None
 
+    # Parse context_aware flag and optional client-provided signals
+    context_aware = bool(data.get("context_aware", False))
+    context_signals = None
+    if context_aware:
+        raw_location = data.get("location")
+        ca_location = None
+        if raw_location:
+            ca_location = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(raw_location)).strip()[:200] or None
+
+        raw_weather = data.get("weather")
+        ca_weather = None
+        if raw_weather:
+            ca_weather = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(raw_weather)).strip()[:200] or None
+
+        raw_timezone = data.get("timezone")
+        ca_timezone = None
+        if raw_timezone:
+            ca_timezone = str(raw_timezone).strip()[:50] or None
+
+        context_signals = gather_context_signals(
+            timezone=ca_timezone,
+            location=ca_location,
+            weather=ca_weather,
+        )
+        logger.info(f"Context-aware mode: {context_signals}")
+
     # Build enriched prompt
-    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed)
+    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed, context_signals=context_signals)
 
     try:
         spotify = get_spotify()
@@ -419,20 +626,23 @@ def generate():
         logger.exception("Spotify auth failed")
         return jsonify({"error": "Spotify authentication failed. Please try again later."}), 500
 
+    deadline_start = time.monotonic()
+
     try:
         # Step 1: Generate search queries (scaled by count for larger playlists)
         queries = generate_search_queries(enriched_prompt, count=count)
-        logger.info(f"Generated {len(queries)} search queries for: {prompt}")
+        ctx_tag = " [context-aware]" if context_signals else ""
+        logger.info(f"Generated {len(queries)} search queries for: {prompt}{ctx_tag}")
 
         # Step 2: Search Spotify
-        candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to)
+        candidates = discover_candidates(spotify, queries, era_from=era_from, era_to=era_to, deadline_start=deadline_start)
         logger.info(f"Found {len(candidates)} unique candidate tracks")
 
         if not candidates:
             return jsonify({"error": "No tracks found on Spotify. Try a broader genre or more well-known artists."}), 404
 
         # Step 3: Curate
-        curated = curate_playlist(enriched_prompt, candidates, count)
+        curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start, context_signals=context_signals)
 
         # Filter to valid URIs
         valid_uris = {c.uri for c in candidates}
@@ -451,13 +661,28 @@ def generate():
             for uri in track_uris if uri in uri_to_track
         ]
 
-        return jsonify({
+        # Build spotify:// deep link from the web URL for mobile app integration
+        spotify_uri = url.replace("https://open.spotify.com/", "spotify://") if url else url
+
+        response = {
             "playlist_url": url,
+            "spotify_uri": spotify_uri,
             "playlist_name": curated.playlist_name,
             "description": curated.description,
             "tracks": tracks,
-        })
+            "tracks_found": len(track_uris),
+            "context": context_signals,
+        }
+        if len(track_uris) < count:
+            response["warning"] = (
+                f"Only {len(track_uris)} {'track' if len(track_uris) == 1 else 'tracks'} "
+                f"matched your criteria (you requested {count})."
+            )
+        return jsonify(response)
 
+    except TimeoutError:
+        logger.warning(f"Request deadline exceeded for prompt: {prompt}")
+        return jsonify({"error": "Request took too long. Try a simpler prompt or fewer tracks."}), 504
     except ValueError as e:
         return jsonify({"error": str(e)}), 500
     except anthropic.AuthenticationError:
@@ -472,7 +697,11 @@ def generate():
         return jsonify({"error": "Something went wrong. Please try again."}), 500
 
 
-if __name__ == "__main__":
-    # Pre-initialize Spotify client on startup
+# Pre-initialize Spotify client on startup (works under both gunicorn and dev server)
+try:
     get_spotify()
+except Exception:
+    logger.warning("Spotify client init deferred — will retry on first request.")
+
+if __name__ == "__main__":
     app.run(debug=True, port=5000)

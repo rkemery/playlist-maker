@@ -272,8 +272,8 @@
       display: none;
     }
     .result.visible { display: block; animation: fadeIn 0.3s; }
-    .result h2 { font-size: 1.25rem; margin-bottom: 4px; }
-    .result .desc { color: #b3b3b3; margin-bottom: 16px; }
+    .result h2 { font-size: 1.25rem; margin-bottom: 4px; overflow-wrap: break-word; }
+    .result .desc { color: #b3b3b3; margin-bottom: 16px; overflow-wrap: break-word; }
     .result-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
     .btn-spotify {
       display: inline-flex;
@@ -708,7 +708,12 @@
 
         document.getElementById("playlistName").textContent = data.playlist_name;
         document.getElementById("playlistDesc").textContent = data.description;
-        document.getElementById("playlistLink").href = data.playlist_url;
+        const playlistUrl = data.playlist_url;
+        if (typeof playlistUrl === "string" && playlistUrl.startsWith("https://")) {
+          document.getElementById("playlistLink").href = playlistUrl;
+        } else {
+          document.getElementById("playlistLink").href = "#";
+        }
 
         const trackList = document.getElementById("trackList");
         trackList.innerHTML = "";
