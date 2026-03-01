@@ -26,6 +26,7 @@ from app import (
     build_prompt,
     discover_candidates,
     gather_context_signals,
+    generate_search_queries,
 )
 
 
@@ -1012,3 +1013,121 @@ class TestCurationContextSignals:
             call_args = mock_client.messages.parse.call_args
             content = call_args[1]["messages"][0]["content"]
             assert "listener's current context" not in content
+
+
+# --- Deadline enforcement in _request ---
+
+class TestRequestDeadlineEnforcement:
+    @patch("app.time.sleep")
+    def test_request_checks_deadline_before_retry(self, mock_sleep, spotify_client):
+        """_request should check deadline before each retry attempt."""
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "1"}
+
+        spotify_client.session.request = MagicMock(return_value=rate_limited)
+
+        # Start deadline far in the past so it's already expired
+        expired_start = time.monotonic() - REQUEST_DEADLINE - 1
+        with pytest.raises(TimeoutError):
+            spotify_client._request("GET", "search", deadline_start=expired_start)
+
+    @patch("app.time.sleep")
+    def test_request_checks_deadline_before_rate_limit_sleep(self, mock_sleep, spotify_client):
+        """_request should check deadline after getting 429, before sleeping."""
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "5"}
+
+        success = MagicMock()
+        success.status_code = 200
+        success.content = b'{"ok": true}'
+        success.json.return_value = {"ok": True}
+
+        spotify_client.session.request = MagicMock(side_effect=[rate_limited, success])
+
+        # Start with valid deadline — first attempt returns 429, deadline check should pass
+        valid_start = time.monotonic()
+        result = spotify_client._request("GET", "search", deadline_start=valid_start)
+        assert result == {"ok": True}
+
+    @patch("app.time.sleep")
+    def test_request_checks_deadline_before_5xx_backoff(self, mock_sleep, spotify_client):
+        """_request should check deadline before sleeping on 5xx retries."""
+        server_error = MagicMock()
+        server_error.status_code = 500
+
+        spotify_client.session.request = MagicMock(return_value=server_error)
+
+        expired_start = time.monotonic() - REQUEST_DEADLINE - 1
+        with pytest.raises(TimeoutError):
+            spotify_client._request("GET", "search", deadline_start=expired_start)
+
+    def test_search_tracks_passes_deadline(self, spotify_client):
+        """search_tracks should thread deadline_start to _request."""
+        spotify_client._request = MagicMock(return_value={
+            "tracks": {"items": []}
+        })
+        deadline = time.monotonic()
+        spotify_client.search_tracks("test", deadline_start=deadline)
+        call_kwargs = spotify_client._request.call_args[1]
+        assert call_kwargs["deadline_start"] == deadline
+
+
+# --- Deadline enforcement in discover_candidates ---
+
+class TestDiscoverCandidatesDeadline:
+    def test_returns_partial_results_on_deadline(self, spotify_client):
+        """discover_candidates should return partial results when deadline expires."""
+        call_count = 0
+
+        def slow_search(query, limit=10, deadline_start=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return [CandidateTrack(title=f"Song {call_count}", artist="A", uri=f"spotify:track:{call_count}")]
+            # Simulate a deadline expiry for remaining queries
+            raise TimeoutError("deadline exceeded")
+
+        spotify_client.search_tracks = MagicMock(side_effect=slow_search)
+
+        candidates = discover_candidates(
+            spotify_client, ["q1", "q2", "q3", "q4", "q5"],
+            max_workers=1,
+            deadline_start=time.monotonic(),
+        )
+        # Should have at least some results from the queries that completed
+        assert len(candidates) >= 1
+
+    def test_deadline_expired_before_search_starts(self, spotify_client):
+        """discover_candidates should raise TimeoutError if deadline is already expired."""
+        spotify_client.search_tracks = MagicMock(return_value=[])
+
+        expired_start = time.monotonic() - REQUEST_DEADLINE - 1
+        # The final _check_deadline after the pool should raise
+        with pytest.raises(TimeoutError):
+            discover_candidates(
+                spotify_client, ["q1"],
+                max_workers=1,
+                deadline_start=expired_start,
+            )
+
+
+# --- Deadline enforcement in generate_search_queries ---
+
+class TestGenerateSearchQueriesDeadline:
+    def test_checks_deadline_before_api_call(self):
+        """generate_search_queries should check deadline before calling Anthropic."""
+        expired_start = time.monotonic() - REQUEST_DEADLINE - 1
+        with pytest.raises(TimeoutError):
+            generate_search_queries("test prompt", deadline_start=expired_start)
+
+    def test_works_without_deadline(self):
+        """generate_search_queries should work normally when no deadline is set."""
+        with patch("app._anthropic_client") as mock_client:
+            mock_response = MagicMock()
+            mock_response.parsed_output = SearchQueries(queries=["q1", "q2"])
+            mock_client.messages.parse.return_value = mock_response
+
+            result = generate_search_queries("test prompt")
+            assert result == ["q1", "q2"]

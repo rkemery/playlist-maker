@@ -9,7 +9,7 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
@@ -101,10 +101,13 @@ class SpotifyClient:
             token = self.auth.get_access_token(as_dict=False)
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    def _request(self, method: str, path: str, max_retries: int = 3, **kwargs) -> dict:
+    def _request(self, method: str, path: str, max_retries: int = 3,
+                 deadline_start: Optional[float] = None, **kwargs) -> dict:
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
         last_resp = None
         for attempt in range(max_retries):
+            if deadline_start is not None:
+                _check_deadline(deadline_start)
             resp = self.session.request(
                 method, f"{SPOTIFY_API}/{path}", headers=self._headers(), **kwargs
             )
@@ -116,9 +119,13 @@ class SpotifyClient:
                     retry_after = 10
                 else:
                     logger.warning(f"Rate limited, retrying in {retry_after}s...")
+                if deadline_start is not None:
+                    _check_deadline(deadline_start)
                 time.sleep(retry_after)
                 continue
             if resp.status_code >= 500 and attempt < max_retries - 1:
+                if deadline_start is not None:
+                    _check_deadline(deadline_start)
                 time.sleep(2 ** attempt)
                 continue
             resp.raise_for_status()
@@ -127,9 +134,11 @@ class SpotifyClient:
         last_resp.raise_for_status()
         return {}  # unreachable, but satisfies type checker
 
-    def search_tracks(self, query: str, limit: int = 10) -> list[CandidateTrack]:
+    def search_tracks(self, query: str, limit: int = 10,
+                      deadline_start: Optional[float] = None) -> list[CandidateTrack]:
         data = self._request(
-            "GET", "search", params={"q": query, "type": "track", "limit": limit}
+            "GET", "search", params={"q": query, "type": "track", "limit": limit},
+            deadline_start=deadline_start,
         )
         candidates = []
         for item in data.get("tracks", {}).get("items", []):
@@ -311,7 +320,8 @@ def gather_context_signals(
 
 # --- AI Functions ---
 
-def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2) -> list[str]:
+def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2,
+                            deadline_start: Optional[float] = None) -> list[str]:
     # Scale query count for larger playlists to build a bigger candidate pool
     if count <= 20:
         query_range = "8-12"
@@ -321,6 +331,8 @@ def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2)
         query_range = "16-20"
 
     for attempt in range(max_attempts):
+        if deadline_start is not None:
+            _check_deadline(deadline_start)
         try:
             response = _anthropic_client.messages.parse(
                 model="claude-sonnet-4-6",
@@ -372,20 +384,26 @@ def discover_candidates(
         queries = filtered_queries + queries
 
     def _search(query: str) -> list[CandidateTrack]:
-        try:
-            if deadline_start is not None:
-                _check_deadline(deadline_start)
-            return spotify.search_tracks(query, limit=10)
-        except (requests.HTTPError, requests.Timeout) as e:
-            logger.warning(f"Search failed for query '{query}': {e}")
-            return []
+        if deadline_start is not None:
+            _check_deadline(deadline_start)
+        return spotify.search_tracks(query, limit=10, deadline_start=deadline_start)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for results in pool.map(_search, queries):
-            for track in results:
-                if track.uri not in seen_uris:
-                    seen_uris.add(track.uri)
-                    candidates.append(track)
+        futures = {pool.submit(_search, q): q for q in queries}
+        try:
+            remaining = (REQUEST_DEADLINE - (time.monotonic() - deadline_start)) if deadline_start else None
+            for future in as_completed(futures, timeout=remaining):
+                try:
+                    results = future.result()
+                    for track in results:
+                        if track.uri not in seen_uris:
+                            seen_uris.add(track.uri)
+                            candidates.append(track)
+                except (TimeoutError, requests.HTTPError, requests.Timeout) as e:
+                    logger.warning(f"Search task failed: {e}")
+        except TimeoutError:
+            logger.warning(f"Deadline reached during search, returning {len(candidates)} partial results")
+            pool.shutdown(wait=False, cancel_futures=True)
 
     if deadline_start is not None:
         _check_deadline(deadline_start)
@@ -630,7 +648,7 @@ def generate():
 
     try:
         # Step 1: Generate search queries (scaled by count for larger playlists)
-        queries = generate_search_queries(enriched_prompt, count=count)
+        queries = generate_search_queries(enriched_prompt, count=count, deadline_start=deadline_start)
         ctx_tag = " [context-aware]" if context_signals else ""
         logger.info(f"Generated {len(queries)} search queries for: {prompt}{ctx_tag}")
 
