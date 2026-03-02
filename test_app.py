@@ -1081,7 +1081,7 @@ class TestDiscoverCandidatesDeadline:
         """discover_candidates should return partial results when deadline expires."""
         call_count = 0
 
-        def slow_search(query, limit=10, deadline_start=None):
+        def slow_search(query, limit=10, deadline_start=None, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:

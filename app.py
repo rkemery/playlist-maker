@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 
 SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private"
-HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls
-REQUEST_DEADLINE = 200  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
+HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls (playlist creation, etc.)
+SEARCH_TIMEOUT = (5, 10)  # (connect, read) seconds for Spotify search — fail fast on hangs
+REQUEST_DEADLINE = 110  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
 API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access (Siri Shortcuts, etc.)
 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
@@ -135,10 +136,15 @@ class SpotifyClient:
         return {}  # unreachable, but satisfies type checker
 
     def search_tracks(self, query: str, limit: int = 10,
-                      deadline_start: Optional[float] = None) -> list[CandidateTrack]:
+                      deadline_start: Optional[float] = None,
+                      timeout: Optional[tuple] = None,
+                      max_retries: int = 3) -> list[CandidateTrack]:
+        kwargs: dict = {"params": {"q": query, "type": "track", "limit": limit}}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         data = self._request(
-            "GET", "search", params={"q": query, "type": "track", "limit": limit},
-            deadline_start=deadline_start,
+            "GET", "search", max_retries=max_retries,
+            deadline_start=deadline_start, **kwargs,
         )
         candidates = []
         for item in data.get("tracks", {}).get("items", []):
@@ -337,6 +343,7 @@ def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2,
             response = _anthropic_client.messages.parse(
                 model="claude-sonnet-4-6",
                 max_tokens=1024,
+                timeout=60.0,
                 messages=[
                     {
                         "role": "user",
@@ -386,7 +393,10 @@ def discover_candidates(
     def _search(query: str) -> list[CandidateTrack]:
         if deadline_start is not None:
             _check_deadline(deadline_start)
-        return spotify.search_tracks(query, limit=10, deadline_start=deadline_start)
+        return spotify.search_tracks(
+            query, limit=5, deadline_start=deadline_start,
+            timeout=SEARCH_TIMEOUT, max_retries=2,
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_search, q): q for q in queries}
@@ -437,8 +447,9 @@ def curate_playlist(
             _check_deadline(deadline_start)
         try:
             response = _anthropic_client.messages.parse(
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 max_tokens=4096,
+                timeout=60.0,
                 messages=[
                     {
                         "role": "user",
@@ -672,7 +683,8 @@ def generate():
         # Step 4: Create playlist
         uri_to_track = {c.uri: c for c in candidates}
         url, tracks_added = spotify.create_playlist(curated.playlist_name, curated.description, track_uris)
-        logger.info(f"Created playlist '{curated.playlist_name}': {tracks_added}/{len(track_uris)} tracks added")
+        elapsed = time.monotonic() - deadline_start
+        logger.info(f"Created playlist '{curated.playlist_name}': {tracks_added}/{len(track_uris)} tracks added ({elapsed:.1f}s)")
 
         tracks = [
             {"title": uri_to_track[uri].title, "artist": uri_to_track[uri].artist}
