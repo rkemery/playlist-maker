@@ -398,22 +398,27 @@ def discover_candidates(
             timeout=SEARCH_TIMEOUT, max_retries=2,
         )
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    # IMPORTANT: Do NOT use `with ThreadPoolExecutor(...)` here.
+    # The `with` block's __exit__ always calls shutdown(wait=True), which blocks
+    # on stuck threads even after we call shutdown(wait=False, cancel_futures=True).
+    # This caused worker timeouts when Spotify API was slow/unreachable.
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         futures = {pool.submit(_search, q): q for q in queries}
-        try:
-            remaining = (REQUEST_DEADLINE - (time.monotonic() - deadline_start)) if deadline_start else None
-            for future in as_completed(futures, timeout=remaining):
-                try:
-                    results = future.result()
-                    for track in results:
-                        if track.uri not in seen_uris:
-                            seen_uris.add(track.uri)
-                            candidates.append(track)
-                except (TimeoutError, requests.HTTPError, requests.Timeout) as e:
-                    logger.warning(f"Search task failed: {e}")
-        except TimeoutError:
-            logger.warning(f"Deadline reached during search, returning {len(candidates)} partial results")
-            pool.shutdown(wait=False, cancel_futures=True)
+        remaining = (REQUEST_DEADLINE - (time.monotonic() - deadline_start)) if deadline_start else None
+        for future in as_completed(futures, timeout=remaining):
+            try:
+                results = future.result()
+                for track in results:
+                    if track.uri not in seen_uris:
+                        seen_uris.add(track.uri)
+                        candidates.append(track)
+            except (TimeoutError, requests.HTTPError, requests.Timeout) as e:
+                logger.warning(f"Search task failed: {e}")
+    except TimeoutError:
+        logger.warning(f"Deadline reached during search, returning {len(candidates)} partial results")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     if deadline_start is not None:
         _check_deadline(deadline_start)
