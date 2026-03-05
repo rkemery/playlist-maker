@@ -90,12 +90,26 @@ class SpotifyClient:
     """Lightweight Spotify API client using raw requests with auto-refreshing tokens."""
 
     def __init__(self, cache_path: str) -> None:
-        self.auth = SpotifyOAuth(scope=SCOPES, cache_path=cache_path)
+        self.auth = SpotifyOAuth(
+            scope=SCOPES, cache_path=cache_path,
+            requests_timeout=10,  # Prevent token refresh from hanging indefinitely
+        )
         self.session = requests.Session()
         self._token_lock = threading.Lock()
         # Acquire token eagerly so the interactive browser auth happens once,
         # before any parallel threads try to use it.
         self.auth.get_access_token(as_dict=False)
+
+    def ensure_token(self) -> None:
+        """Eagerly refresh the Spotify token on the main thread.
+
+        Must be called before parallel search to prevent all thread pool workers
+        from blocking on _token_lock while spotipy refreshes an expired token.
+        Spotipy tokens expire after 1 hour; without this, the first request after
+        idle periods hangs because every worker thread tries to refresh at once.
+        """
+        with self._token_lock:
+            self.auth.get_access_token(as_dict=False)
 
     def _headers(self) -> dict[str, str]:
         with self._token_lock:
@@ -397,6 +411,12 @@ def discover_candidates(
             query, limit=5, deadline_start=deadline_start,
             timeout=SEARCH_TIMEOUT, max_retries=2,
         )
+
+    # Pre-refresh token on main thread before parallel search.
+    # Spotify tokens expire after 1 hour; if stale, spotipy refreshes via HTTP.
+    # Without this, all 5 pool workers block on _token_lock waiting for the
+    # first thread to finish refreshing — causing 0 results and silent hangs.
+    spotify.ensure_token()
 
     # IMPORTANT: Do NOT use `with ThreadPoolExecutor(...)` here.
     # The `with` block's __exit__ always calls shutdown(wait=True), which blocks

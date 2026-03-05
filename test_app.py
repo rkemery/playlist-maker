@@ -1131,3 +1131,43 @@ class TestGenerateSearchQueriesDeadline:
 
             result = generate_search_queries("test prompt")
             assert result == ["q1", "q2"]
+
+
+# --- Token refresh before parallel search ---
+
+class TestEnsureToken:
+    def test_ensure_token_calls_get_access_token(self, spotify_client):
+        """ensure_token should call get_access_token under the lock."""
+        spotify_client._token_lock = MagicMock()
+        spotify_client.auth.get_access_token.reset_mock()
+
+        spotify_client.ensure_token()
+
+        spotify_client.auth.get_access_token.assert_called_once_with(as_dict=False)
+        spotify_client._token_lock.__enter__.assert_called()
+
+    def test_discover_candidates_calls_ensure_token(self, spotify_client):
+        """discover_candidates should pre-refresh the token before parallel search."""
+        spotify_client.ensure_token = MagicMock()
+        spotify_client.search_tracks = MagicMock(return_value=[
+            CandidateTrack(title="Song", artist="Artist", uri="spotify:track:1"),
+        ])
+
+        discover_candidates(
+            spotify_client, ["q1"],
+            max_workers=1,
+            deadline_start=time.monotonic(),
+        )
+
+        spotify_client.ensure_token.assert_called_once()
+
+    def test_spotify_oauth_has_requests_timeout(self):
+        """SpotifyOAuth should be initialized with requests_timeout to prevent hanging."""
+        with patch("app.SpotifyOAuth") as mock_oauth:
+            mock_oauth.return_value.get_access_token = MagicMock(return_value="fake")
+            SpotifyClient(cache_path="/tmp/test_cache")
+
+            mock_oauth.assert_called_once()
+            call_kwargs = mock_oauth.call_args[1]
+            assert "requests_timeout" in call_kwargs
+            assert call_kwargs["requests_timeout"] == 10
