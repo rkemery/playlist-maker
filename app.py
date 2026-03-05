@@ -10,7 +10,7 @@ import random
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse
@@ -35,6 +35,7 @@ SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private user-library-read"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls (playlist creation, etc.)
 SEARCH_TIMEOUT = (5, 10)  # (connect, read) seconds for Spotify search — fail fast on hangs
+LIBRARY_TIMEOUT = (5, 10)  # (connect, read) seconds for liked songs — fail fast, non-critical
 REQUEST_DEADLINE = 110  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
 API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access (Siri Shortcuts, etc.)
 
@@ -204,12 +205,15 @@ class SpotifyClient:
 
         Makes 2 API calls: one to get total count, one to fetch a random slice.
         Returns list of {"title": str, "artist": str} dicts.
+        Uses a shorter timeout (LIBRARY_TIMEOUT) since this is non-critical data.
         """
         # Get total count with a minimal request
         meta = self._request(
             "GET", "me/tracks",
             params={"limit": 1, "offset": 0},
             deadline_start=deadline_start,
+            timeout=LIBRARY_TIMEOUT,
+            max_retries=1,
         )
         total = meta.get("total", 0)
         if total == 0:
@@ -223,6 +227,8 @@ class SpotifyClient:
             "GET", "me/tracks",
             params={"limit": limit, "offset": offset},
             deadline_start=deadline_start,
+            timeout=LIBRARY_TIMEOUT,
+            max_retries=1,
         )
 
         tracks = []
@@ -735,22 +741,45 @@ def generate():
     deadline_start = time.monotonic()
 
     try:
-        # Fetch liked songs for taste context if requested
+        # Run liked songs fetch + AI query generation in parallel.
+        # The base prompt (without library context) is enough for query generation,
+        # and library context is woven into the curation prompt anyway.
+        # This saves 0.5-1s on happy path and avoids blocking on library timeouts.
         library_context = None
-        if use_library:
-            liked = spotify.get_liked_tracks(limit=50, deadline_start=deadline_start)
-            if liked:
-                library_context = format_library_context(liked)
-                logger.info(f"Library mode: sampled {len(liked)} liked songs")
+        base_prompt = build_prompt(
+            prompt, energy, moods, context, era_from, era_to, seed,
+            context_signals=context_signals,
+        )
 
-        # Build enriched prompt
+        if use_library:
+            library_pool = ThreadPoolExecutor(max_workers=1)
+            library_future: Optional[Future] = library_pool.submit(
+                spotify.get_liked_tracks, 50, deadline_start
+            )
+        else:
+            library_pool = None
+            library_future = None
+
+        # Step 1: Generate search queries (runs in parallel with library fetch)
+        queries = generate_search_queries(base_prompt, count=count, deadline_start=deadline_start)
+
+        # Collect library results (should be done by now — query gen takes 3-5s)
+        if library_future is not None:
+            try:
+                liked = library_future.result(timeout=10)
+                if liked:
+                    library_context = format_library_context(liked)
+                    logger.info(f"Library mode: sampled {len(liked)} liked songs")
+            except Exception as e:
+                logger.warning(f"Library fetch failed (continuing without): {e}")
+            finally:
+                library_pool.shutdown(wait=False)
+
+        # Build enriched prompt with library context for curation
         enriched_prompt = build_prompt(
             prompt, energy, moods, context, era_from, era_to, seed,
             context_signals=context_signals, library_context=library_context,
         )
-
-        # Step 1: Generate search queries (scaled by count for larger playlists)
-        queries = generate_search_queries(enriched_prompt, count=count, deadline_start=deadline_start)
         ctx_tag = " [context-aware]" if context_signals else ""
         logger.info(f"Generated {len(queries)} search queries for: {prompt}{ctx_tag}")
 

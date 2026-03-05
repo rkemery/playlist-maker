@@ -1297,10 +1297,11 @@ class TestUseLibraryEndpoint:
         )
         assert resp.status_code == 200
 
-        # Verify the prompt sent to Claude includes library context
-        query_gen_call = mock_anthropic.messages.parse.call_args_list[0]
-        prompt_text = query_gen_call[1]["messages"][0]["content"]
-        assert "Artist A - Song A" in prompt_text
+        # Library context goes to curation (2nd AI call), not query gen (1st)
+        # because library fetch runs in parallel with query gen for speed.
+        curation_call = mock_anthropic.messages.parse.call_args_list[1]
+        curation_prompt = curation_call[1]["messages"][0]["content"]
+        assert "Artist A - Song A" in curation_prompt
 
     @patch("app.get_spotify")
     @patch("app._anthropic_client")
