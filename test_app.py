@@ -25,6 +25,7 @@ from app import (
     app,
     build_prompt,
     discover_candidates,
+    format_library_context,
     gather_context_signals,
     generate_search_queries,
 )
@@ -1171,3 +1172,160 @@ class TestEnsureToken:
             call_kwargs = mock_oauth.call_args[1]
             assert "requests_timeout" in call_kwargs
             assert call_kwargs["requests_timeout"] == 10
+
+
+# --- Library context (use_library) ---
+
+class TestGetLikedTracks:
+    def test_returns_tracks_from_library(self, spotify_client):
+        """get_liked_tracks should fetch and parse liked songs from Spotify."""
+        spotify_client._request = MagicMock(side_effect=[
+            # First call: get total count
+            {"total": 200},
+            # Second call: get actual tracks
+            {"items": [
+                {"track": {"name": "Mr. Brightside", "artists": [{"name": "The Killers"}]}},
+                {"track": {"name": "Dreams", "artists": [{"name": "Fleetwood Mac"}]}},
+            ]},
+        ])
+
+        tracks = spotify_client.get_liked_tracks(limit=50)
+        assert len(tracks) == 2
+        assert tracks[0] == {"title": "Mr. Brightside", "artist": "The Killers"}
+        assert tracks[1] == {"title": "Dreams", "artist": "Fleetwood Mac"}
+
+    def test_returns_empty_when_no_liked_songs(self, spotify_client):
+        """get_liked_tracks should return empty list when user has no liked songs."""
+        spotify_client._request = MagicMock(return_value={"total": 0})
+
+        tracks = spotify_client.get_liked_tracks(limit=50)
+        assert tracks == []
+        # Should only make 1 call (the count check), not the fetch
+        spotify_client._request.assert_called_once()
+
+    def test_skips_tracks_without_name(self, spotify_client):
+        """get_liked_tracks should skip malformed track entries."""
+        spotify_client._request = MagicMock(side_effect=[
+            {"total": 10},
+            {"items": [
+                {"track": {"name": "", "artists": [{"name": "Artist"}]}},
+                {"track": {"artists": [{"name": "Artist"}]}},
+                {"track": {"name": "Good Song", "artists": [{"name": "Good Artist"}]}},
+            ]},
+        ])
+
+        tracks = spotify_client.get_liked_tracks(limit=50)
+        assert len(tracks) == 1
+        assert tracks[0]["title"] == "Good Song"
+
+    def test_passes_deadline_start(self, spotify_client):
+        """get_liked_tracks should pass deadline_start to _request."""
+        spotify_client._request = MagicMock(side_effect=[
+            {"total": 10},
+            {"items": []},
+        ])
+        deadline = time.monotonic()
+
+        spotify_client.get_liked_tracks(limit=50, deadline_start=deadline)
+
+        for call in spotify_client._request.call_args_list:
+            assert call[1].get("deadline_start") == deadline
+
+
+class TestFormatLibraryContext:
+    def test_formats_tracks_into_context_string(self):
+        """format_library_context should produce a readable taste profile."""
+        tracks = [
+            {"title": "Mr. Brightside", "artist": "The Killers"},
+            {"title": "Dreams", "artist": "Fleetwood Mac"},
+        ]
+        result = format_library_context(tracks)
+        assert "The Killers - Mr. Brightside" in result
+        assert "Fleetwood Mac - Dreams" in result
+        assert "music taste" in result
+
+    def test_returns_empty_string_for_no_tracks(self):
+        """format_library_context should return empty string for empty input."""
+        assert format_library_context([]) == ""
+
+
+class TestBuildPromptWithLibrary:
+    def test_library_context_appended(self):
+        """build_prompt should include library_context when provided."""
+        result = build_prompt("test prompt", library_context="User likes rock music.")
+        assert "test prompt" in result
+        assert "User likes rock music." in result
+
+    def test_library_context_none_is_noop(self):
+        """build_prompt should work normally when library_context is None."""
+        result = build_prompt("test prompt", library_context=None)
+        assert result == "test prompt"
+
+
+class TestUseLibraryEndpoint:
+    @patch("app.get_spotify")
+    @patch("app._anthropic_client")
+    def test_use_library_fetches_liked_songs(self, mock_anthropic, mock_get_spotify, client):
+        """use_library=true should fetch liked songs and include them in the prompt."""
+        mock_spotify = MagicMock()
+        mock_get_spotify.return_value = mock_spotify
+        mock_spotify._request = MagicMock(side_effect=[
+            {"total": 100},
+            {"items": [
+                {"track": {"name": "Song A", "artists": [{"name": "Artist A"}]}},
+            ]},
+        ])
+        mock_spotify.get_liked_tracks = SpotifyClient.get_liked_tracks.__get__(mock_spotify)
+        mock_spotify.ensure_token = MagicMock()
+        mock_spotify.search_tracks = MagicMock(return_value=[
+            CandidateTrack(title="Found Song", artist="Found Artist", uri="spotify:track:found1"),
+        ])
+        mock_spotify.create_playlist = MagicMock(return_value=("https://open.spotify.com/playlist/abc", 1))
+
+        mock_response_queries = MagicMock()
+        mock_response_queries.parsed_output = SearchQueries(queries=["test query"])
+        mock_response_curate = MagicMock()
+        mock_response_curate.parsed_output = CuratedPlaylist(
+            playlist_name="Test", description="Test", selected_uris=["spotify:track:found1"]
+        )
+        mock_anthropic.messages.parse.side_effect = [mock_response_queries, mock_response_curate]
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "driving playlist", "use_library": True},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 200
+
+        # Verify the prompt sent to Claude includes library context
+        query_gen_call = mock_anthropic.messages.parse.call_args_list[0]
+        prompt_text = query_gen_call[1]["messages"][0]["content"]
+        assert "Artist A - Song A" in prompt_text
+
+    @patch("app.get_spotify")
+    @patch("app._anthropic_client")
+    def test_use_library_false_skips_fetch(self, mock_anthropic, mock_get_spotify, client):
+        """use_library=false should not fetch liked songs."""
+        mock_spotify = MagicMock()
+        mock_get_spotify.return_value = mock_spotify
+        mock_spotify.ensure_token = MagicMock()
+        mock_spotify.search_tracks = MagicMock(return_value=[
+            CandidateTrack(title="Song", artist="Artist", uri="spotify:track:1"),
+        ])
+        mock_spotify.create_playlist = MagicMock(return_value=("https://open.spotify.com/playlist/abc", 1))
+
+        mock_response_queries = MagicMock()
+        mock_response_queries.parsed_output = SearchQueries(queries=["query"])
+        mock_response_curate = MagicMock()
+        mock_response_curate.parsed_output = CuratedPlaylist(
+            playlist_name="Test", description="Test", selected_uris=["spotify:track:1"]
+        )
+        mock_anthropic.messages.parse.side_effect = [mock_response_queries, mock_response_curate]
+
+        resp = client.post(
+            "/api/generate",
+            json={"prompt": "rock playlist", "use_library": False},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 200
+        mock_spotify.get_liked_tracks.assert_not_called()

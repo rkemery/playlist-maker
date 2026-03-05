@@ -6,6 +6,7 @@ import calendar
 import hmac
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -31,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SPOTIFY_API = "https://api.spotify.com/v1"
-SCOPES = "playlist-modify-public playlist-modify-private"
+SCOPES = "playlist-modify-public playlist-modify-private user-library-read"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls (playlist creation, etc.)
 SEARCH_TIMEOUT = (5, 10)  # (connect, read) seconds for Spotify search — fail fast on hangs
 REQUEST_DEADLINE = 110  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
@@ -197,6 +198,43 @@ class SpotifyClient:
                 logger.warning(f"Failed to add batch starting at index {i}, skipping")
         return playlist_url, tracks_added
 
+    def get_liked_tracks(self, limit: int = 50,
+                         deadline_start: Optional[float] = None) -> list[dict]:
+        """Fetch a random sample of the user's liked/saved tracks.
+
+        Makes 2 API calls: one to get total count, one to fetch a random slice.
+        Returns list of {"title": str, "artist": str} dicts.
+        """
+        # Get total count with a minimal request
+        meta = self._request(
+            "GET", "me/tracks",
+            params={"limit": 1, "offset": 0},
+            deadline_start=deadline_start,
+        )
+        total = meta.get("total", 0)
+        if total == 0:
+            return []
+
+        # Pick a random offset to sample from across the library
+        max_offset = max(0, total - limit)
+        offset = random.randint(0, max_offset) if max_offset > 0 else 0
+
+        data = self._request(
+            "GET", "me/tracks",
+            params={"limit": limit, "offset": offset},
+            deadline_start=deadline_start,
+        )
+
+        tracks = []
+        for item in data.get("items", []):
+            track = item.get("track", {})
+            name = track.get("name")
+            if not name:
+                continue
+            artists = ", ".join(a["name"] for a in track.get("artists", []))
+            tracks.append({"title": name, "artist": artists})
+        return tracks
+
 
 # --- Allowed values for mood/context ---
 
@@ -211,6 +249,18 @@ ALLOWED_CONTEXTS = {
 ENERGY_LABELS = {1: "very low energy/calm", 2: "low energy/relaxed", 3: "moderate energy", 4: "high energy/upbeat", 5: "very high energy/intense"}
 
 
+def format_library_context(liked_tracks: list[dict]) -> str:
+    """Format liked tracks into a compact taste-profile string for the AI prompt."""
+    if not liked_tracks:
+        return ""
+    track_strs = [f"{t['artist']} - {t['title']}" for t in liked_tracks]
+    return (
+        "The user's music taste (sampled from their liked songs): "
+        + ", ".join(track_strs)
+        + ". Use these as a reference for the kind of music they enjoy."
+    )
+
+
 def build_prompt(
     prompt: str,
     energy: Optional[int] = None,
@@ -220,6 +270,7 @@ def build_prompt(
     era_to: Optional[int] = None,
     seed: Optional[str] = None,
     context_signals: Optional[str] = None,
+    library_context: Optional[str] = None,
 ) -> str:
     """Build an enriched prompt string from the base prompt and optional mood/context fields."""
     parts = [prompt]
@@ -238,6 +289,8 @@ def build_prompt(
         parts.append(f"Use '{seed}' as a style/sound reference.")
     if context_signals:
         parts.append(context_signals)
+    if library_context:
+        parts.append(library_context)
     return " ".join(parts)
 
 
@@ -645,6 +698,8 @@ def generate():
     if raw_seed:
         seed = str(raw_seed).strip()[:100] or None
 
+    use_library = bool(data.get("use_library", False))
+
     # Parse context_aware flag and optional client-provided signals
     context_aware = bool(data.get("context_aware", False))
     context_signals = None
@@ -671,9 +726,6 @@ def generate():
         )
         logger.info(f"Context-aware mode: {context_signals}")
 
-    # Build enriched prompt
-    enriched_prompt = build_prompt(prompt, energy, moods, context, era_from, era_to, seed, context_signals=context_signals)
-
     try:
         spotify = get_spotify()
     except Exception:
@@ -683,6 +735,20 @@ def generate():
     deadline_start = time.monotonic()
 
     try:
+        # Fetch liked songs for taste context if requested
+        library_context = None
+        if use_library:
+            liked = spotify.get_liked_tracks(limit=50, deadline_start=deadline_start)
+            if liked:
+                library_context = format_library_context(liked)
+                logger.info(f"Library mode: sampled {len(liked)} liked songs")
+
+        # Build enriched prompt
+        enriched_prompt = build_prompt(
+            prompt, energy, moods, context, era_from, era_to, seed,
+            context_signals=context_signals, library_context=library_context,
+        )
+
         # Step 1: Generate search queries (scaled by count for larger playlists)
         queries = generate_search_queries(enriched_prompt, count=count, deadline_start=deadline_start)
         ctx_tag = " [context-aware]" if context_signals else ""

@@ -62,11 +62,19 @@ AI-powered Spotify playlist generator. Users describe a vibe in plain English (w
   "context_aware": true,
   "timezone": "America/Indiana/Indianapolis",
   "location": "Indianapolis, IN",
-  "weather": "72F, partly cloudy"
+  "weather": "72F, partly cloudy",
+  "use_library": true
 }
 ```
 
 **Response includes:** `playlist_url`, `spotify_uri`, `playlist_name`, `description`, `tracks`, `tracks_found`, `context`
+
+### Library Mode
+When `use_library: true`, the server fetches a random sample of 50 liked/saved songs from the user's Spotify library and includes them as taste context in the AI prompts. This helps Claude generate search queries and curate tracks that match the user's actual listening preferences.
+
+Key helpers in `app.py`:
+- `SpotifyClient.get_liked_tracks()` — fetches random sample from `GET /me/tracks`
+- `format_library_context()` — formats liked tracks into a compact taste-profile string
 
 ### Context-Aware Mode
 When `context_aware: true`, the server gathers temporal signals (time of day, day of week, season, nearby holidays) and combines with optional client-provided `location`, `weather`, `timezone`. These signals are woven into the AI prompt and playlist naming.
