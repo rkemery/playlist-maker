@@ -7,7 +7,7 @@ AI-powered Spotify playlist generator. Users describe a vibe in plain English (w
 ## Tech Stack
 
 - **Backend:** Python / Flask / Gunicorn (single file: `app.py`)
-- **AI:** Claude Sonnet (query generation) → Claude Opus (curation)
+- **AI:** Claude Sonnet (query generation + curation)
 - **Music:** Spotify Web API via `spotipy` OAuth
 - **Infra:** Azure App Service (Linux), GitHub Actions CI/CD
 - **Frontend:** Vanilla HTML/CSS/JS in `static/index.html` — no build step
@@ -90,7 +90,7 @@ Key helpers in `app.py`:
 ```
 Client → Flask → Claude Sonnet (generate search queries)
                 → Spotify API (parallel search)
-                → Claude Opus (curate tracks, name playlist)
+                → Claude Sonnet (curate tracks, name playlist)
                 → Spotify API (create playlist, add tracks)
                 → Response with playlist URL/URI
 ```
@@ -130,6 +130,78 @@ az webapp log download --name rkemery-playlist-maker-dev --resource-group rg-rlk
 curl -s -o /dev/null -w "%{http_code}" https://rkemery-playlist-maker-dev.azurewebsites.net/
 curl -s -o /dev/null -w "%{http_code}" https://rkemery-playlist-maker.azurewebsites.net/
 ```
+
+## Spotify Token Management
+
+The app uses OAuth tokens cached in `.spotify_cache` on Azure persistent storage (`/home/site/wwwroot/.spotify_cache`). Tokens auto-refresh, but re-authentication is needed when OAuth scopes change (e.g., adding `user-library-read`).
+
+### When to Re-auth
+
+- After adding/removing scopes in `SCOPES` (line 34 of `app.py`)
+- If the cached token becomes invalid or corrupted
+
+### Re-auth Process
+
+Since Azure doesn't have a browser for interactive OAuth, generate the token locally and upload:
+
+1. **Get Spotify credentials from Azure** (stored as app settings, not in code):
+   ```bash
+   az webapp config appsettings list --name rkemery-playlist-maker-dev \
+     --resource-group rg-rlkemery-5175 --query "[?name=='SPOTIPY_CLIENT_ID' || name=='SPOTIPY_CLIENT_SECRET' || name=='SPOTIPY_REDIRECT_URI'].{name:name, value:value}"
+   ```
+
+2. **Set credentials locally** (export as env vars — do not commit):
+   ```bash
+   export SPOTIPY_CLIENT_ID="<from step 1>"
+   export SPOTIPY_CLIENT_SECRET="<from step 1>"
+   export SPOTIPY_REDIRECT_URI="<from step 1>"
+   ```
+
+3. **Generate auth URL** using Python:
+   ```python
+   from spotipy.oauth2 import SpotifyOAuth
+   auth = SpotifyOAuth(scope="playlist-modify-public playlist-modify-private user-library-read")
+   print(auth.get_authorize_url())
+   ```
+
+4. **Open the URL in a browser**, authorize the app, then copy the full callback URL from the browser address bar (it will contain a `code` parameter).
+
+5. **Exchange the code for a token**:
+   ```python
+   import re, json
+   callback_url = "<paste the callback URL here>"
+   code = re.search(r'code=([^&]+)', callback_url).group(1)
+   token_info = auth.get_access_token(code)
+   with open(".spotify_cache", "w") as f:
+       json.dump(token_info, f)
+   ```
+
+6. **Upload to Azure** (both dev and prod):
+   ```bash
+   # Dev
+   curl -X PUT "https://rkemery-playlist-maker-dev.scm.azurewebsites.net/api/vfs/site/wwwroot/.spotify_cache" \
+     -u '<deployment-credentials>' \
+     -H "If-Match: *" -H "Content-Type: application/json" \
+     --data-binary @.spotify_cache
+
+   # Prod
+   curl -X PUT "https://rkemery-playlist-maker.scm.azurewebsites.net/api/vfs/site/wwwroot/.spotify_cache" \
+     -u '<deployment-credentials>' \
+     -H "If-Match: *" -H "Content-Type: application/json" \
+     --data-binary @.spotify_cache
+   ```
+
+   **Tip:** Kudu deployment credentials can be found in the Azure Portal under the app's Deployment Center, or use `az webapp deployment list-publishing-credentials`.
+
+7. **Clean up** — delete the local `.spotify_cache` and unset env vars:
+   ```bash
+   rm .spotify_cache
+   unset SPOTIPY_CLIENT_ID SPOTIPY_CLIENT_SECRET SPOTIPY_REDIRECT_URI
+   ```
+
+### Redirect URI
+
+The `SPOTIPY_REDIRECT_URI` app setting on Azure must match exactly what's configured in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard). If you get `INVALID_CLIENT: Invalid redirect URI`, update the dashboard to match.
 
 ## Important Notes
 
