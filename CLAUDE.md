@@ -7,7 +7,7 @@ AI-powered Spotify playlist generator. Users describe a vibe in plain English (w
 ## Tech Stack
 
 - **Backend:** Python / Flask / Gunicorn (single file: `app.py`)
-- **AI:** Claude Sonnet (query generation + curation)
+- **AI:** Claude Sonnet 4.6 (query generation + curation)
 - **Music:** Spotify Web API via `spotipy` OAuth
 - **Infra:** Azure App Service (Linux), GitHub Actions CI/CD
 - **Frontend:** Vanilla HTML/CSS/JS in `static/index.html` — no build step
@@ -21,15 +21,23 @@ AI-powered Spotify playlist generator. Users describe a vibe in plain English (w
 | `static/index.html` | Web UI (single file) |
 | `startup.sh` | Gunicorn entrypoint for Azure |
 | `requirements.txt` | Python dependencies |
-| `.github/workflows/deploy.yml` | CI/CD: push to `main` → deploy to prod |
-| `.github/workflows/deploy-dev.yml` | CI/CD: push to `dev` → deploy to dev |
+| `.github/workflows/deploy.yml` | CI/CD: push to `main` → test + deploy to prod |
+| `.github/workflows/deploy-dev.yml` | CI/CD: push to `dev` → test + deploy to dev |
+| `.github/workflows/deploy-function.yml` | Deploy daily image Azure Function |
+| `.github/workflows/provision-azure.yml` | Provision Azure resources (manual trigger) |
+
+### GitHub Actions
+- `actions/checkout@v6` and `actions/setup-python@v6` — native Node.js 24
+- Azure actions (`webapps-deploy@v2`, `login@v2`, `cli@v2`) — still on v2, use `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` env var until v3 releases
 
 ## Environments
 
-| Env | URL | Azure App | Resource Group |
-|---|---|---|---|
-| **Prod** | `rkemery-playlist-maker.azurewebsites.net` | `rkemery-playlist-maker` | `rg-rlkemery-5175` |
-| **Dev** | `rkemery-playlist-maker-dev.azurewebsites.net` | `rkemery-playlist-maker-dev` | `rg-rlkemery-5175` |
+| Env | URL | Azure App | Resource Group | Always On |
+|---|---|---|---|---|
+| **Prod** | `rkemery-playlist-maker.azurewebsites.net` | `rkemery-playlist-maker` | `rg-rlkemery-5175` | Check |
+| **Dev** | `rkemery-playlist-maker-dev.azurewebsites.net` | `rkemery-playlist-maker-dev` | `rg-rlkemery-5175` | Yes |
+
+Both run on a shared B1 Basic App Service plan (`playlist-maker-plan`, Central US, Linux).
 
 ## Git Workflow
 
@@ -70,11 +78,13 @@ AI-powered Spotify playlist generator. Users describe a vibe in plain English (w
 **Response includes:** `playlist_url`, `spotify_uri`, `playlist_name`, `description`, `tracks`, `tracks_found`, `context`
 
 ### Library Mode
-When `use_library: true`, the server fetches a random sample of 50 liked/saved songs from the user's Spotify library and includes them as taste context in the AI prompts. This helps Claude generate search queries and curate tracks that match the user's actual listening preferences.
+When `use_library: true`, the server fetches a random sample of 50 liked/saved songs from the user's Spotify library **before** query generation. The taste profile influences both search query generation AND curation, so Claude searches for artists/genres the user actually likes instead of guessing generic ones.
 
 Key helpers in `app.py`:
-- `SpotifyClient.get_liked_tracks()` — fetches random sample from `GET /me/tracks`
+- `SpotifyClient.get_liked_tracks()` — fetches random sample from `GET /me/tracks` (timeout: 5s connect, 20s read, 2 retries)
 - `format_library_context()` — formats liked tracks into a compact taste-profile string
+
+**Important:** Library fetch runs sequentially before query generation (not in parallel). This adds ~1-2s but produces much better personalized results. Without it, prompts like "songs we'd love for a drive" generate generic country/classic rock instead of matching the user's taste.
 
 ### Context-Aware Mode
 When `context_aware: true`, the server gathers temporal signals (time of day, day of week, season, nearby holidays) and combines with optional client-provided `location`, `weather`, `timezone`. These signals are woven into the AI prompt and playlist naming.
@@ -88,16 +98,28 @@ Key helpers in `app.py`:
 ## Architecture Flow
 
 ```
-Client → Flask → Claude Sonnet (generate search queries)
-                → Spotify API (parallel search)
-                → Claude Sonnet (curate tracks, name playlist)
-                → Spotify API (create playlist, add tracks)
-                → Response with playlist URL/URI
+Client → Flask → [if use_library] Spotify API (fetch liked songs for taste profile)
+              → Claude Sonnet 4.6 (generate search queries, informed by taste profile)
+              → Spotify API (parallel search, 5 workers)
+              → Claude Sonnet 4.6 (curate tracks, name playlist)
+              → Spotify API (create playlist, add tracks)
+              → Response with playlist URL/URI
 ```
 
 ## Request Deadline
 
-All requests have a server-side time budget (`REQUEST_DEADLINE_SECONDS`, default 110s). AI calls and Spotify operations check remaining time and abort gracefully if the deadline is near, preventing Gunicorn worker timeouts.
+All requests have a server-side time budget (`REQUEST_DEADLINE`, default 110s). AI calls and Spotify operations check remaining time and abort gracefully if the deadline is near, preventing Gunicorn worker timeouts (240s).
+
+## Timeouts
+
+| Constant | Value | Used For |
+|---|---|---|
+| `HTTP_TIMEOUT` | (5, 30) | Playlist creation, general Spotify API |
+| `SEARCH_TIMEOUT` | (5, 10) | Spotify search queries |
+| `LIBRARY_TIMEOUT` | (5, 20) | Liked songs fetch (generous for token refresh) |
+| `REQUEST_DEADLINE` | 110s | Overall request budget |
+
+Library fetch uses `max_retries=2` to survive stale token refresh on first attempt.
 
 ## Running Tests
 
