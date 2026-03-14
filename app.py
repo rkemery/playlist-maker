@@ -741,45 +741,27 @@ def generate():
     deadline_start = time.monotonic()
 
     try:
-        # Run liked songs fetch + AI query generation in parallel.
-        # The base prompt (without library context) is enough for query generation,
-        # and library context is woven into the curation prompt anyway.
-        # This saves 0.5-1s on happy path and avoids blocking on library timeouts.
+        # Fetch liked songs first when use_library is set, so the taste profile
+        # can influence both query generation AND curation. This adds ~1-2s but
+        # produces much better personalized results vs generic genre guessing.
         library_context = None
-        base_prompt = build_prompt(
-            prompt, energy, moods, context, era_from, era_to, seed,
-            context_signals=context_signals,
-        )
-
         if use_library:
-            library_pool = ThreadPoolExecutor(max_workers=1)
-            library_future: Optional[Future] = library_pool.submit(
-                spotify.get_liked_tracks, 50, deadline_start
-            )
-        else:
-            library_pool = None
-            library_future = None
-
-        # Step 1: Generate search queries (runs in parallel with library fetch)
-        queries = generate_search_queries(base_prompt, count=count, deadline_start=deadline_start)
-
-        # Collect library results (should be done by now — query gen takes 3-5s)
-        if library_future is not None:
             try:
-                liked = library_future.result(timeout=10)
+                liked = spotify.get_liked_tracks(50, deadline_start)
                 if liked:
                     library_context = format_library_context(liked)
                     logger.info(f"Library mode: sampled {len(liked)} liked songs")
             except Exception as e:
                 logger.warning(f"Library fetch failed (continuing without): {e}")
-            finally:
-                library_pool.shutdown(wait=False)
 
-        # Build enriched prompt with library context for curation
+        # Build prompt with library context so query generation knows the user's taste
         enriched_prompt = build_prompt(
             prompt, energy, moods, context, era_from, era_to, seed,
             context_signals=context_signals, library_context=library_context,
         )
+
+        # Step 1: Generate search queries (now informed by library taste profile)
+        queries = generate_search_queries(enriched_prompt, count=count, deadline_start=deadline_start)
         ctx_tag = " [context-aware]" if context_signals else ""
         logger.info(f"Generated {len(queries)} search queries for: {prompt}{ctx_tag}")
 
