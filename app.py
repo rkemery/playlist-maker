@@ -35,7 +35,7 @@ SPOTIFY_API = "https://api.spotify.com/v1"
 SCOPES = "playlist-modify-public playlist-modify-private user-library-read"
 HTTP_TIMEOUT = (5, 30)  # (connect, read) seconds for Spotify API calls (playlist creation, etc.)
 SEARCH_TIMEOUT = (5, 10)  # (connect, read) seconds for Spotify search — fail fast on hangs
-LIBRARY_TIMEOUT = (5, 10)  # (connect, read) seconds for liked songs — fail fast, non-critical
+LIBRARY_TIMEOUT = (5, 20)  # (connect, read) seconds for liked songs — generous read timeout for cold starts
 REQUEST_DEADLINE = 110  # seconds — overall limit per /api/generate request (buffer before 240s gunicorn timeout)
 API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access (Siri Shortcuts, etc.)
 
@@ -213,7 +213,7 @@ class SpotifyClient:
             params={"limit": 1, "offset": 0},
             deadline_start=deadline_start,
             timeout=LIBRARY_TIMEOUT,
-            max_retries=1,
+            max_retries=2,
         )
         total = meta.get("total", 0)
         if total == 0:
@@ -228,7 +228,7 @@ class SpotifyClient:
             params={"limit": limit, "offset": offset},
             deadline_start=deadline_start,
             timeout=LIBRARY_TIMEOUT,
-            max_retries=1,
+            max_retries=2,
         )
 
         tracks = []
