@@ -1171,7 +1171,7 @@ class TestEnsureToken:
             mock_oauth.assert_called_once()
             call_kwargs = mock_oauth.call_args[1]
             assert "requests_timeout" in call_kwargs
-            assert call_kwargs["requests_timeout"] == 10
+            assert call_kwargs["requests_timeout"] == 20
 
 
 # --- Library context (use_library) ---

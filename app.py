@@ -94,7 +94,7 @@ class SpotifyClient:
     def __init__(self, cache_path: str) -> None:
         self.auth = SpotifyOAuth(
             scope=SCOPES, cache_path=cache_path,
-            requests_timeout=10,  # Prevent token refresh from hanging indefinitely
+            requests_timeout=20,  # Generous timeout for token refresh (accounts.spotify.com)
         )
         self.session = requests.Session()
         self._token_lock = threading.Lock()
@@ -109,9 +109,19 @@ class SpotifyClient:
         from blocking on _token_lock while spotipy refreshes an expired token.
         Spotipy tokens expire after 1 hour; without this, the first request after
         idle periods hangs because every worker thread tries to refresh at once.
+        Retries once on timeout since the first attempt may fail establishing the
+        connection to accounts.spotify.com after idle periods.
         """
-        with self._token_lock:
-            self.auth.get_access_token(as_dict=False)
+        for attempt in range(2):
+            try:
+                with self._token_lock:
+                    self.auth.get_access_token(as_dict=False)
+                return
+            except requests.exceptions.ReadTimeout:
+                if attempt == 0:
+                    logger.warning("Token refresh timed out, retrying...")
+                    continue
+                raise
 
     def _headers(self) -> dict[str, str]:
         with self._token_lock:
