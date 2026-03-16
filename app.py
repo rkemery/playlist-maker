@@ -48,6 +48,11 @@ _library_cache_time: float = 0.0
 _library_cache_lock = threading.Lock()
 LIBRARY_CACHE_TTL = 86400  # 24 hours in seconds
 
+# Cache for wait_mode — stores last generated playlist to avoid re-generation
+_last_playlist: Optional[dict] = None
+_last_playlist_time: float = 0.0
+_last_playlist_lock = threading.Lock()
+
 # Simple in-memory rate limiter: max 5 requests per IP per 60 seconds
 RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
@@ -631,6 +636,7 @@ def daily_image():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
+    global _library_cache, _library_cache_time, _last_playlist, _last_playlist_time
     # API key authentication — allows programmatic callers (Siri Shortcuts, etc.)
     # to bypass CSRF. If the header is present it must be valid; if absent, fall
     # through to the normal Origin/Referer CSRF check for browser requests.
@@ -722,6 +728,25 @@ def generate():
 
     use_library = bool(data.get("use_library", False))
 
+    # Parse wait_mode — if enabled, return the cached playlist when one was
+    # generated within the last wait_mode_min minutes (default 60, max 60).
+    wait_mode = bool(data.get("wait_mode", False))
+    wait_mode_min = 60
+    if wait_mode:
+        raw_wait = data.get("wait_mode_min")
+        if raw_wait is not None:
+            try:
+                wait_mode_min = max(1, min(60, int(raw_wait)))
+            except (TypeError, ValueError):
+                return jsonify({"error": "wait_mode_min must be an integer (1-60)."}), 400
+
+        with _last_playlist_lock:
+            if _last_playlist is not None:
+                age_min = (time.monotonic() - _last_playlist_time) / 60
+                if age_min < wait_mode_min:
+                    logger.info(f"Wait mode: returning cached playlist ({age_min:.1f}m old, limit {wait_mode_min}m)")
+                    return jsonify(_last_playlist)
+
     # Parse context_aware flag and optional client-provided signals
     context_aware = bool(data.get("context_aware", False))
     context_signals = None
@@ -759,7 +784,6 @@ def generate():
     try:
         # Fetch liked songs for taste profile. Cached for 24h since library
         # changes rarely — eliminates ~1-2s Spotify API calls on repeat requests.
-        global _library_cache, _library_cache_time
         library_context = None
         if use_library:
             with _library_cache_lock:
@@ -841,6 +865,13 @@ def generate():
                 f"Only {len(track_uris)} {'track' if len(track_uris) == 1 else 'tracks'} "
                 f"matched your criteria (you requested {count})."
             )
+
+        # Cache for wait_mode so subsequent requests within the window
+        # return this playlist instead of generating a new one.
+        with _last_playlist_lock:
+            _last_playlist = response
+            _last_playlist_time = time.monotonic()
+
         return jsonify(response)
 
     except TimeoutError:
