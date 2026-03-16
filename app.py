@@ -424,9 +424,9 @@ def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2,
             _check_deadline(deadline_start)
         try:
             response = _anthropic_client.messages.parse(
-                model="claude-sonnet-4-6",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
-                timeout=60.0,
+                timeout=30.0,
                 messages=[
                     {
                         "role": "user",
