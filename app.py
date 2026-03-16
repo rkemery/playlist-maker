@@ -670,6 +670,10 @@ def generate():
     if not data or not data.get("prompt"):
         return jsonify({"error": "Missing 'prompt' field"}), 400
 
+    # Log request flags for debugging Shortcut integration
+    logger.info(f"Request flags: wait_mode={data.get('wait_mode')}, wait_mode_min={data.get('wait_mode_min')}, "
+                f"use_library={data.get('use_library')}, context_aware={data.get('context_aware')}")
+
     prompt = re.sub(r'[\s\u200b\u00a0\ufeff]+', ' ', str(data["prompt"])).strip()
     if not prompt:
         return jsonify({"error": "Prompt cannot be empty."}), 400
