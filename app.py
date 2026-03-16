@@ -42,6 +42,12 @@ API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
 
+# Cache for liked songs — refreshed once per day since library changes rarely
+_library_cache: Optional[list[dict]] = None
+_library_cache_time: float = 0.0
+_library_cache_lock = threading.Lock()
+LIBRARY_CACHE_TTL = 86400  # 24 hours in seconds
+
 # Simple in-memory rate limiter: max 5 requests per IP per 60 seconds
 RATE_LIMIT_MAX = 5
 RATE_LIMIT_WINDOW = 60
@@ -751,18 +757,33 @@ def generate():
     deadline_start = time.monotonic()
 
     try:
-        # Fetch liked songs first when use_library is set, so the taste profile
-        # can influence both query generation AND curation. This adds ~1-2s but
-        # produces much better personalized results vs generic genre guessing.
+        # Fetch liked songs for taste profile. Cached for 24h since library
+        # changes rarely — eliminates ~1-2s Spotify API calls on repeat requests.
+        global _library_cache, _library_cache_time
         library_context = None
         if use_library:
-            try:
-                liked = spotify.get_liked_tracks(50, deadline_start)
-                if liked:
-                    library_context = format_library_context(liked)
-                    logger.info(f"Library mode: sampled {len(liked)} liked songs")
-            except Exception as e:
-                logger.warning(f"Library fetch failed (continuing without): {e}")
+            with _library_cache_lock:
+                cache_age = time.monotonic() - _library_cache_time
+                if _library_cache is not None and cache_age < LIBRARY_CACHE_TTL:
+                    liked = _library_cache
+                    logger.info(f"Library mode: using cached {len(liked)} liked songs ({cache_age:.0f}s old)")
+                else:
+                    liked = None
+
+            if liked is None:
+                try:
+                    liked = spotify.get_liked_tracks(50, deadline_start)
+                    if liked:
+                        with _library_cache_lock:
+                            _library_cache = liked
+                            _library_cache_time = time.monotonic()
+                        logger.info(f"Library mode: fetched and cached {len(liked)} liked songs")
+                except Exception as e:
+                    logger.warning(f"Library fetch failed (continuing without): {e}")
+                    liked = None
+
+            if liked:
+                library_context = format_library_context(liked)
 
         # Build prompt with library context so query generation knows the user's taste
         enriched_prompt = build_prompt(
