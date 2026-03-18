@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 import hmac
+import json
 import logging
 import os
 import random
@@ -42,16 +43,32 @@ API_KEY = os.environ.get("API_KEY")  # Optional API key for programmatic access 
 # Shared Anthropic client — reused across requests (thread-safe, keeps connection pool)
 _anthropic_client = anthropic.Anthropic()
 
-# Cache for liked songs — refreshed once per day since library changes rarely
-_library_cache: Optional[list[dict]] = None
-_library_cache_time: float = 0.0
-_library_cache_lock = threading.Lock()
+# File-based caches in /tmp — shared across gunicorn workers.
+# In-memory caches don't work with multiple workers (separate processes).
+LIBRARY_CACHE_PATH = "/tmp/playlist_maker_library_cache.json"
 LIBRARY_CACHE_TTL = 86400  # 24 hours in seconds
+WAIT_MODE_CACHE_PATH = "/tmp/playlist_maker_last_playlist.json"
 
-# Cache for wait_mode — stores last generated playlist to avoid re-generation
-_last_playlist: Optional[dict] = None
-_last_playlist_time: float = 0.0
-_last_playlist_lock = threading.Lock()
+
+def _read_file_cache(path: str) -> Optional[dict]:
+    """Read a JSON cache file. Returns None if missing, expired, or corrupt."""
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_file_cache(path: str, data: dict) -> None:
+    """Write a JSON cache file atomically."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning(f"Failed to write cache: {path}")
+
 
 # Simple in-memory rate limiter: max 5 requests per IP per 60 seconds
 RATE_LIMIT_MAX = 5
@@ -636,7 +653,6 @@ def daily_image():
 
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    global _library_cache, _library_cache_time, _last_playlist, _last_playlist_time
     # API key authentication — allows programmatic callers (Siri Shortcuts, etc.)
     # to bypass CSRF. If the header is present it must be valid; if absent, fall
     # through to the normal Origin/Referer CSRF check for browser requests.
@@ -734,6 +750,7 @@ def generate():
 
     # Parse wait_mode — if enabled, return the cached playlist when one was
     # generated within the last wait_mode_min minutes (default 60, max 60).
+    # Uses file-based cache so it works across gunicorn workers.
     wait_mode = bool(data.get("wait_mode", False))
     wait_mode_min = 60
     if wait_mode:
@@ -744,12 +761,12 @@ def generate():
             except (TypeError, ValueError):
                 return jsonify({"error": "wait_mode_min must be an integer (1-60)."}), 400
 
-        with _last_playlist_lock:
-            if _last_playlist is not None:
-                age_min = (time.monotonic() - _last_playlist_time) / 60
-                if age_min < wait_mode_min:
-                    logger.info(f"Wait mode: returning cached playlist ({age_min:.1f}m old, limit {wait_mode_min}m)")
-                    return jsonify(_last_playlist)
+        cached = _read_file_cache(WAIT_MODE_CACHE_PATH)
+        if cached and "timestamp" in cached and "response" in cached:
+            age_min = (time.time() - cached["timestamp"]) / 60
+            if age_min < wait_mode_min:
+                logger.info(f"Wait mode: returning cached playlist ({age_min:.1f}m old, limit {wait_mode_min}m)")
+                return jsonify(cached["response"])
 
     # Parse context_aware flag and optional client-provided signals
     context_aware = bool(data.get("context_aware", False))
@@ -788,23 +805,25 @@ def generate():
     try:
         # Fetch liked songs for taste profile. Cached for 24h since library
         # changes rarely — eliminates ~1-2s Spotify API calls on repeat requests.
+        # File-based cache so it works across gunicorn workers.
         library_context = None
         if use_library:
-            with _library_cache_lock:
-                cache_age = time.monotonic() - _library_cache_time
-                if _library_cache is not None and cache_age < LIBRARY_CACHE_TTL:
-                    liked = _library_cache
+            liked = None
+            cached = _read_file_cache(LIBRARY_CACHE_PATH)
+            if cached and "timestamp" in cached and "tracks" in cached:
+                cache_age = time.time() - cached["timestamp"]
+                if cache_age < LIBRARY_CACHE_TTL:
+                    liked = cached["tracks"]
                     logger.info(f"Library mode: using cached {len(liked)} liked songs ({cache_age:.0f}s old)")
-                else:
-                    liked = None
 
             if liked is None:
                 try:
                     liked = spotify.get_liked_tracks(50, deadline_start)
                     if liked:
-                        with _library_cache_lock:
-                            _library_cache = liked
-                            _library_cache_time = time.monotonic()
+                        _write_file_cache(LIBRARY_CACHE_PATH, {
+                            "timestamp": time.time(),
+                            "tracks": liked,
+                        })
                         logger.info(f"Library mode: fetched and cached {len(liked)} liked songs")
                 except Exception as e:
                     logger.warning(f"Library fetch failed (continuing without): {e}")
@@ -874,9 +893,11 @@ def generate():
 
         # Cache for wait_mode so subsequent requests within the window
         # return this playlist instead of generating a new one.
-        with _last_playlist_lock:
-            _last_playlist = response
-            _last_playlist_time = time.monotonic()
+        # File-based so it works across gunicorn workers.
+        _write_file_cache(WAIT_MODE_CACHE_PATH, {
+            "timestamp": time.time(),
+            "response": response,
+        })
 
         return jsonify(response)
 
