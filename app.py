@@ -850,6 +850,12 @@ def generate():
         if not candidates:
             return jsonify({"error": "No tracks found on Spotify. Try a broader genre or more well-known artists."}), 404
 
+        # Cap candidates to keep curation prompt lean (fewer tokens = faster response).
+        # Shuffle first so we don't always send the same subset.
+        if len(candidates) > 40:
+            random.shuffle(candidates)
+            candidates = candidates[:40]
+
         # Step 3: Curate
         curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start, context_signals=context_signals)
 
