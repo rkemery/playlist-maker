@@ -94,7 +94,7 @@ class CandidateTrack(pydantic.BaseModel):
 class CuratedPlaylist(pydantic.BaseModel):
     playlist_name: str
     description: str
-    selected_uris: list[str]
+    selected_tracks: list[int]  # 1-based track numbers from the candidate list
 
 
 # --- Spotify Client ---
@@ -108,6 +108,8 @@ class SpotifyClient:
             requests_timeout=20,  # Generous timeout for token refresh (accounts.spotify.com)
         )
         self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        self.session.mount("https://", adapter)
         self._token_lock = threading.Lock()
         # Acquire token eagerly so the interactive browser auth happens once,
         # before any parallel threads try to use it.
@@ -468,7 +470,7 @@ def generate_search_queries(prompt: str, count: int = 20, max_attempts: int = 2,
 def discover_candidates(
     spotify: SpotifyClient,
     queries: list[str],
-    max_workers: int = 5,
+    max_workers: int = 10,
     era_from: Optional[int] = None,
     era_to: Optional[int] = None,
     deadline_start: Optional[float] = None,
@@ -476,13 +478,11 @@ def discover_candidates(
     seen_uris: set[str] = set()
     candidates: list[CandidateTrack] = []
 
-    # Run queries both WITH and WITHOUT year filter when era is set.
-    # The year-filtered queries find era-specific hits; the unfiltered queries
-    # provide fallback candidates that curation can still filter by era.
+    # When era is set, add year filter to queries so Spotify returns era-specific hits.
+    # Curation handles any edge cases where good tracks fall outside the strict filter.
     if era_from is not None and era_to is not None:
         year_filter = f" year:{era_from}" if era_from == era_to else f" year:{era_from}-{era_to}"
-        filtered_queries = [q + year_filter for q in queries]
-        queries = filtered_queries + queries
+        queries = [q + year_filter for q in queries]
 
     def _search(query: str) -> list[CandidateTrack]:
         if deadline_start is not None:
@@ -532,7 +532,7 @@ def curate_playlist(
     context_signals: Optional[str] = None,
 ) -> CuratedPlaylist:
     track_list = "\n".join(
-        f"- [{t.uri}] {t.title} — {t.artist}" for t in candidates
+        f"{i+1}. {t.title} — {t.artist}" for i, t in enumerate(candidates)
     )
 
     # When the candidate pool is small relative to the requested count,
@@ -567,7 +567,7 @@ def curate_playlist(
                             "- ONLY select tracks that genuinely match the prompt's theme/genre/mood\n"
                             "- Skip any track that feels off-theme, even if it's a good song\n"
                             "- Prefer variety in artists when possible\n"
-                            "- Return the spotify URIs of your selections in selected_uris\n\n"
+                            "- Return the track numbers in selected_tracks\n\n"
                             "Also create a playlist name and description matching the mood."
                             + (
                                 f"\n\nThe listener's current context: {context_signals} "
@@ -834,9 +834,11 @@ def generate():
         # Step 3: Curate
         curated = curate_playlist(enriched_prompt, candidates, count, deadline_start=deadline_start, context_signals=context_signals)
 
-        # Filter to valid URIs
-        valid_uris = {c.uri for c in candidates}
-        track_uris = [uri for uri in curated.selected_uris if uri in valid_uris]
+        # Map 1-based track numbers back to URIs
+        track_uris = []
+        for num in curated.selected_tracks:
+            if 1 <= num <= len(candidates):
+                track_uris.append(candidates[num - 1].uri)
 
         if not track_uris:
             return jsonify({"error": "No matching tracks passed curation. Try a broader prompt or different keywords."}), 404

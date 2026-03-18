@@ -294,11 +294,11 @@ class TestDiscoverCandidates:
         candidates = discover_candidates(spotify_client, ["q1", "q2"], max_workers=2)
         assert len(candidates) == 1
 
-    def test_era_doubles_queries(self, spotify_client):
+    def test_era_filters_queries(self, spotify_client):
         spotify_client.search_tracks = MagicMock(return_value=[])
         discover_candidates(spotify_client, ["q1", "q2"], max_workers=1, era_from=1980, era_to=1989)
-        # Should search with 4 queries: 2 filtered + 2 unfiltered
-        assert spotify_client.search_tracks.call_count == 4
+        # Should search with 2 year-filtered queries (no longer doubled)
+        assert spotify_client.search_tracks.call_count == 2
 
     def test_handles_search_failure(self, spotify_client):
         spotify_client.search_tracks = MagicMock(side_effect=requests.HTTPError())
@@ -322,7 +322,7 @@ class TestGenerateEndpoint:
         mock_curate.return_value = CuratedPlaylist(
             playlist_name="Chill Vibes",
             description="Relaxing",
-            selected_uris=["spotify:track:1", "spotify:track:2"],
+            selected_tracks=[1, 2],
         )
         mock_sp = MagicMock()
         mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 2)
@@ -369,7 +369,7 @@ class TestGenerateEndpoint:
         ]
         mock_curate.return_value = CuratedPlaylist(
             playlist_name="Test", description="Desc",
-            selected_uris=["spotify:track:1"],
+            selected_tracks=[1],
         )
         mock_sp = MagicMock()
         mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 1)
@@ -400,7 +400,7 @@ class TestGenerateEndpoint:
         mock_discover.return_value = tracks
         mock_curate.return_value = CuratedPlaylist(
             playlist_name="Test", description="Desc",
-            selected_uris=[t.uri for t in tracks],
+            selected_tracks=[i + 1 for i in range(len(tracks))],
         )
         mock_sp = MagicMock()
         mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 2)
@@ -539,7 +539,7 @@ class TestPluralisation:
         with patch("app._anthropic_client") as mock_client:
             mock_response = MagicMock()
             mock_response.parsed_output = CuratedPlaylist(
-                playlist_name="Solo", description="One", selected_uris=["uri:1"]
+                playlist_name="Solo", description="One", selected_tracks=[1]
             )
             mock_client.messages.parse.return_value = mock_response
             curate_playlist("test", [CandidateTrack(title="S", artist="A", uri="uri:1")], count=1)
@@ -826,7 +826,7 @@ class TestContextAwareEndpoint:
         mock_discover.return_value = [track]
         mock_curate.return_value = CuratedPlaylist(
             playlist_name="Test", description="Desc",
-            selected_uris=["spotify:track:1"],
+            selected_tracks=[1],
         )
         mock_sp = MagicMock()
         mock_sp.create_playlist.return_value = ("https://open.spotify.com/playlist/abc", 1)
@@ -978,7 +978,7 @@ class TestCurationContextSignals:
             mock_response = MagicMock()
             mock_response.parsed_output = CuratedPlaylist(
                 playlist_name="Winter Vibes", description="Cozy",
-                selected_uris=["spotify:track:1"],
+                selected_tracks=[1],
             )
             mock_client.messages.parse.return_value = mock_response
 
@@ -1001,7 +1001,7 @@ class TestCurationContextSignals:
             mock_response = MagicMock()
             mock_response.parsed_output = CuratedPlaylist(
                 playlist_name="Vibes", description="Good",
-                selected_uris=["spotify:track:1"],
+                selected_tracks=[1],
             )
             mock_client.messages.parse.return_value = mock_response
 
@@ -1286,7 +1286,7 @@ class TestUseLibraryEndpoint:
         mock_response_queries.parsed_output = SearchQueries(queries=["test query"])
         mock_response_curate = MagicMock()
         mock_response_curate.parsed_output = CuratedPlaylist(
-            playlist_name="Test", description="Test", selected_uris=["spotify:track:found1"]
+            playlist_name="Test", description="Test", selected_tracks=[1]
         )
         mock_anthropic.messages.parse.side_effect = [mock_response_queries, mock_response_curate]
 
@@ -1319,7 +1319,7 @@ class TestUseLibraryEndpoint:
         mock_response_queries.parsed_output = SearchQueries(queries=["query"])
         mock_response_curate = MagicMock()
         mock_response_curate.parsed_output = CuratedPlaylist(
-            playlist_name="Test", description="Test", selected_uris=["spotify:track:1"]
+            playlist_name="Test", description="Test", selected_tracks=[1]
         )
         mock_anthropic.messages.parse.side_effect = [mock_response_queries, mock_response_curate]
 
